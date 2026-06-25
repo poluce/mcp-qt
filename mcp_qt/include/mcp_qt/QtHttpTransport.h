@@ -3,6 +3,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QUrl>
+#include <QTimer>
 #include "mcp_core/IMcpTransport.h"
 
 namespace mcp {
@@ -31,6 +32,7 @@ private slots:
     void handleSseReadyRead();
     void handleSseFinished();
     void handlePostFinished(QNetworkReply* reply);
+    void performReconnect();
 
 private:
     QUrl m_sseUrl;
@@ -43,6 +45,12 @@ private:
     std::function<void(const std::string&)> m_onError;
 
     QByteArray m_sseBuffer;
+    
+    // For Streamable HTTP spec requirements:
+    QString m_lastEventId;
+    QTimer* m_reconnectTimer;
+    bool m_isClosedActively;
 };
 
 } // namespace mcp
+

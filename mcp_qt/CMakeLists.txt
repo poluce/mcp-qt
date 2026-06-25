@@ -19,3 +19,14 @@ target_link_libraries(mcp_qt PUBLIC
     Qt6::Core
     Qt6::Network
 )
+
+add_executable(test_http_transport
+    src/test_http_transport.cpp
+)
+target_link_libraries(test_http_transport PRIVATE
+    mcp_qt
+    mcp_core
+    Qt6::Core
+    Qt6::Network
+)
+

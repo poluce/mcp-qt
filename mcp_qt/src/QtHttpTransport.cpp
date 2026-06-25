@@ -9,7 +9,13 @@ QtHttpTransport::QtHttpTransport(const QUrl& sseUrl, QObject* parent)
     , m_sseUrl(sseUrl)
     , m_nam(new QNetworkAccessManager(this))
     , m_sseReply(nullptr)
+    , m_reconnectTimer(new QTimer(this))
+    , m_isClosedActively(false)
 {
+    m_reconnectTimer->setSingleShot(true);
+    m_reconnectTimer->setInterval(2000); // 2 seconds
+    connect(m_reconnectTimer, &QTimer::timeout, this, &QtHttpTransport::performReconnect);
+
     // Default fallback endpoint if not dynamically configured by SSE endpoint events
     m_postUrl = sseUrl.resolved(QUrl("message"));
     connect(m_nam, &QNetworkAccessManager::finished, this, &QtHttpTransport::handlePostFinished);
@@ -25,6 +31,7 @@ bool QtHttpTransport::send(const std::string& message) {
     }
     QNetworkRequest request(m_postUrl);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
     
     QByteArray postData = QByteArray::fromStdString(message);
     m_nam->post(request, postData);
@@ -48,8 +55,15 @@ bool QtHttpTransport::start() {
         return false;
     }
     
+    m_isClosedActively = false;
+    m_reconnectTimer->stop();
+    
     QNetworkRequest request(m_sseUrl);
     request.setRawHeader("Accept", "text/event-stream");
+    request.setRawHeader("MCP-Protocol-Version", "2025-11-25");
+    if (!m_lastEventId.isEmpty()) {
+        request.setRawHeader("Last-Event-ID", m_lastEventId.toUtf8());
+    }
     
     m_sseReply = m_nam->get(request);
     connect(m_sseReply, &QNetworkReply::readyRead, this, &QtHttpTransport::handleSseReadyRead);
@@ -59,6 +73,12 @@ bool QtHttpTransport::start() {
 }
 
 void QtHttpTransport::close() {
+    m_isClosedActively = true;
+    m_reconnectTimer->stop();
+    
+    // Disconnect finished signal to prevent handlePostFinished callbacks during destruction
+    disconnect(m_nam, &QNetworkAccessManager::finished, this, &QtHttpTransport::handlePostFinished);
+    
     if (m_sseReply) {
         m_sseReply->abort();
         m_sseReply->deleteLater();
@@ -88,6 +108,8 @@ void QtHttpTransport::handleSseReadyRead() {
                 eventType = QString::fromUtf8(line.mid(6).trimmed());
             } else if (line.startsWith("data:")) {
                 dataContent = QString::fromUtf8(line.mid(5).trimmed());
+            } else if (line.startsWith("id:")) {
+                m_lastEventId = QString::fromUtf8(line.mid(3).trimmed());
             }
         }
         
@@ -103,23 +125,41 @@ void QtHttpTransport::handleSseReadyRead() {
 }
 
 void QtHttpTransport::handleSseFinished() {
+    bool wasError = false;
+    std::string errMsg;
     if (m_sseReply) {
         if (m_sseReply->error() != QNetworkReply::NoError && m_sseReply->error() != QNetworkReply::OperationCanceledError) {
-            if (m_onError) {
-                m_onError("SSE network error: " + m_sseReply->errorString().toStdString());
-            }
+            wasError = true;
+            errMsg = m_sseReply->errorString().toStdString();
         }
         m_sseReply->deleteLater();
         m_sseReply = nullptr;
     }
-    if (m_onClose) {
-        m_onClose();
+    
+    if (m_isClosedActively) {
+        if (m_onClose) {
+            m_onClose();
+        }
+    } else {
+        if (wasError && m_onError) {
+            m_onError("SSE disconnected unexpectedly (" + errMsg + "). Reconnecting in 2 seconds...");
+        } else if (m_onError) {
+            m_onError("SSE disconnected unexpectedly. Reconnecting in 2 seconds...");
+        }
+        m_reconnectTimer->start();
     }
+}
+
+void QtHttpTransport::performReconnect() {
+    if (m_onError) {
+        m_onError("Attempting to reconnect SSE...");
+    }
+    start();
 }
 
 void QtHttpTransport::handlePostFinished(QNetworkReply* reply) {
     if (reply) {
-        if (reply->error() != QNetworkReply::NoError) {
+        if (reply->error() != QNetworkReply::NoError && reply->error() != QNetworkReply::OperationCanceledError) {
             if (m_onError) {
                 m_onError("HTTP POST error: " + reply->errorString().toStdString());
             }
@@ -129,3 +169,4 @@ void QtHttpTransport::handlePostFinished(QNetworkReply* reply) {
 }
 
 } // namespace mcp
+
