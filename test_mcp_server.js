@@ -2,6 +2,9 @@
 // 这是一个极简的、零依赖的 Mock MCP Stdio 服务端，用于验证 C++ MCP SDK 功能
 const readline = require('readline');
 
+// 故意在 stdout 输出非 JSON 的脏文本，用于集成验证客户端的拦截过滤与警告机制
+process.stdout.write("Mock Server Started Successfully (Dirty Log for Testing)\n");
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,

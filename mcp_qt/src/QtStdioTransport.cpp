@@ -60,8 +60,17 @@ void QtStdioTransport::close() {
 void QtStdioTransport::handleReadyReadStandardOutput() {
     while (m_process->canReadLine()) {
         QByteArray line = m_process->readLine().trimmed();
-        if (!line.isEmpty() && m_onMessage) {
-            m_onMessage(line.toStdString());
+        if (line.isEmpty()) continue;
+        
+        std::string rawStr = line.toStdString();
+        if (rawStr.front() == '{') {
+            if (m_onMessage) {
+                m_onMessage(rawStr);
+            }
+        } else {
+            if (m_onError) {
+                m_onError("[服务端非法在 stdout 输出日志]: " + rawStr);
+            }
         }
     }
 }
