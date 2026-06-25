@@ -82,6 +82,11 @@ public:
     void listTools(std::function<void(const std::vector<McpTool>& tools, const json& error)> callback);
 
     /**
+     * @brief List the tools exposed by the MCP server with pagination cursor.
+     */
+    void listTools(const std::string& cursor, std::function<void(const std::vector<McpTool>& tools, const std::string& nextCursor, const json& error)> callback);
+
+    /**
      * @brief Execute/call a specific tool on the MCP server.
      */
     void callTool(const std::string& name, const json& arguments,

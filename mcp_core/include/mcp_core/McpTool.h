@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <regex>
 #include <nlohmann/json.hpp>
 
 namespace mcp {
@@ -14,6 +15,14 @@ struct McpTool {
     std::string description;
     json inputSchema; // JSON schema describing parameters
 };
+
+inline bool isValidToolName(const std::string& name) {
+    if (name.empty() || name.length() > 128) {
+        return false;
+    }
+    static const std::regex pattern("^[a-zA-Z0-9_.-]+$");
+    return std::regex_match(name, pattern);
+}
 
 inline void to_json(json& j, const McpTool& tool) {
     j = json{
@@ -34,3 +43,4 @@ inline void from_json(const json& j, McpTool& tool) {
 }
 
 } // namespace mcp
+

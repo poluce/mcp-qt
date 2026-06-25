@@ -230,6 +230,38 @@ void McpClientSession::listTools(std::function<void(const std::vector<McpTool>& 
     });
 }
 
+void McpClientSession::listTools(const std::string& cursor, std::function<void(const std::vector<McpTool>& tools, const std::string& nextCursor, const json& error)> callback) {
+    if (m_state != SessionState::Initialized) {
+        json err = {
+            {"code", -32002},
+            {"message", "Session not initialized"}
+        };
+        callback({}, "", err);
+        return;
+    }
+    json params = json::object();
+    if (!cursor.empty()) {
+        params["cursor"] = cursor;
+    }
+    sendRequest("tools/list", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback({}, "", error);
+        } else {
+            std::vector<McpTool> toolsList;
+            std::string nextCursor;
+            if (result.contains("tools") && result["tools"].is_array()) {
+                for (const auto& item : result["tools"]) {
+                    toolsList.push_back(item.get<McpTool>());
+                }
+            }
+            if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
+                nextCursor = result["nextCursor"].get<std::string>();
+            }
+            callback(toolsList, nextCursor, json::object());
+        }
+    });
+}
+
 void McpClientSession::callTool(const std::string& name, const json& arguments,
                               std::function<void(const json& content, const json& error)> callback) {
     if (m_state != SessionState::Initialized) {

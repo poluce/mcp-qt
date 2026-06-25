@@ -6,7 +6,7 @@ const url = require('url');
 const isHttp = process.argv.includes('--http');
 
 // 支持的工具列表
-const TOOLS = [
+const ALL_TOOLS = [
   {
     name: "calculate_add",
     description: "计算两个数字的和",
@@ -20,8 +20,24 @@ const TOOLS = [
     }
   },
   {
+    name: "get_system_time",
+    description: "获取系统当前时间（无参数测试工具）",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
     name: "get_system_info",
     description: "获取系统版本及当前状态",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "trigger_exception",
+    description: "触发工具内部异常的测试工具",
     inputSchema: {
       type: "object",
       properties: {}
@@ -90,20 +106,49 @@ function processMcpRequest(request) {
       process.exit(0);
     }, 100);
   } else if (method === 'tools/list') {
-    response.result = { tools: TOOLS };
-  } else if (method === 'tools/call') {
-    const toolName = params.name;
-    const args = params.arguments || {};
-    
-    if (toolName === 'calculate_add') {
-      const a = Number(args.a || 0);
-      const b = Number(args.b || 0);
+    const cursor = params ? params.cursor : undefined;
+    if (!cursor) {
+      // 第一页返回前两个工具，且给出 nextCursor
       response.result = {
-        content: [{ type: "text", text: `计算成功，结果为: ${a + b}` }]
+        tools: ALL_TOOLS.slice(0, 2),
+        nextCursor: "page_2"
+      };
+    } else if (cursor === "page_2") {
+      // 第二页返回后两个工具，没有 nextCursor
+      response.result = {
+        tools: ALL_TOOLS.slice(2)
+      };
+    } else {
+      response.error = { code: -32602, message: `Invalid cursor: ${cursor}` };
+    }
+  } else if (method === 'tools/call') {
+    const toolName = params ? params.name : undefined;
+    const args = params ? params.arguments : undefined;
+    
+    if (!toolName) {
+      response.error = { code: -32602, message: "Missing tool name" };
+    } else if (toolName === 'calculate_add') {
+      if (!args || args.a === undefined || args.b === undefined) {
+        response.error = { code: -32602, message: "Missing required arguments: a or b" };
+      } else {
+        const a = Number(args.a);
+        const b = Number(args.b);
+        response.result = {
+          content: [{ type: "text", text: `计算成功，结果为: ${a + b}` }]
+        };
+      }
+    } else if (toolName === 'get_system_time') {
+      response.result = {
+        content: [{ type: "text", text: `系统当前时间为: ${new Date().toISOString()}` }]
       };
     } else if (toolName === 'get_system_info') {
       response.result = {
         content: [{ type: "text", text: `Mock 操作系统版本: Windows 11 PRO (Mocked by JS), 运行正常` }]
+      };
+    } else if (toolName === 'trigger_exception') {
+      response.result = {
+        content: [{ type: "text", text: "触发测试异常：数据库连接失败。" }],
+        isError: true
       };
     } else {
       response.error = { code: -32601, message: `Tool not found: ${toolName}` };
