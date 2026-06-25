@@ -14,6 +14,29 @@ void McpClientSession::init() {
     m_transport->setOnMessage([self](const std::string& msg) {
         self->handleIncomingMessage(msg);
     });
+
+    m_transport->setOnClose([self]() {
+        self->m_state = SessionState::Shutdown;
+        
+        std::vector<ResponseCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(self->m_mutex);
+            for (auto& pair : self->m_pendingRequests) {
+                callbacks.push_back(std::move(pair.second.callback));
+            }
+            self->m_pendingRequests.clear();
+        }
+
+        for (auto& cb : callbacks) {
+            if (cb) {
+                json connErr = {
+                    {"code", -32603},
+                    {"message", "Connection interrupted or server crashed"}
+                };
+                cb(json::object(), connErr);
+            }
+        }
+    });
 }
 
 bool McpClientSession::start() {

@@ -202,9 +202,13 @@ function processMcpRequest(request) {
       } else {
         const a = Number(args.a);
         const b = Number(args.b);
-        response.result = {
-          content: [{ type: "text", text: `计算成功，结果为: ${a + b}` }]
-        };
+        if (isNaN(a) || isNaN(b)) {
+          response.error = { code: -32602, message: "Invalid params: a and b must be numbers" };
+        } else {
+          response.result = {
+            content: [{ type: "text", text: `计算成功，结果为: ${a + b}` }]
+          };
+        }
       }
     } else if (toolName === 'get_system_time') {
       response.result = {
