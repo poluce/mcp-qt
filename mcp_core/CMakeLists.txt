@@ -31,6 +31,7 @@ target_include_directories(mcp_core PUBLIC
 target_link_libraries(mcp_core PUBLIC
     $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>
     CURL::libcurl
+    httplib::httplib
 )
 
 install(TARGETS mcp_core

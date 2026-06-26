@@ -47,6 +47,7 @@ struct OAuthServerMetadata {
     std::vector<std::string> responseTypesSupported;
     std::vector<std::string> grantTypesSupported;
     std::vector<std::string> codeChallengeMethodsSupported;
+    std::vector<std::string> tokenEndpointAuthMethodsSupported;
 
     static OAuthServerMetadata fromJson(const json& j) {
         OAuthServerMetadata m;
@@ -62,6 +63,8 @@ struct OAuthServerMetadata {
             for (auto& s : j["grant_types_supported"]) m.grantTypesSupported.push_back(s.get<std::string>());
         if (j.contains("code_challenge_methods_supported") && j["code_challenge_methods_supported"].is_array())
             for (auto& s : j["code_challenge_methods_supported"]) m.codeChallengeMethodsSupported.push_back(s.get<std::string>());
+        if (j.contains("token_endpoint_auth_methods_supported") && j["token_endpoint_auth_methods_supported"].is_array())
+            for (auto& s : j["token_endpoint_auth_methods_supported"]) m.tokenEndpointAuthMethodsSupported.push_back(s.get<std::string>());
         return m;
     }
 };
@@ -129,19 +132,24 @@ public:
     };
     AuthRequest buildAuthorizationUrl(const OAuthServerMetadata& metadata,
                                       const std::string& clientId,
-                                      const std::vector<std::string>& scopes = {"openid"});
+                                      const std::string& redirectUri = "",
+                                      const std::vector<std::string>& scopes = {"openid"},
+                                      const std::string& resource = "");
 
     // Step 4: Exchange authorization code for tokens
     using TokenCallback = std::function<void(bool success, const OAuthToken& token, const std::string& error)>;
     void exchangeCode(const std::string& tokenEndpoint, const std::string& clientId,
                       const std::string& clientSecret, const std::string& code,
                       const std::string& redirectUri, const std::string& codeVerifier,
-                      TokenCallback callback);
+                      TokenCallback callback, const std::string& resource = "",
+                      bool useClientSecretBasic = false);
     bool exchangeCodeSync(const std::string& tokenEndpoint, const std::string& clientId,
                           const std::string& clientSecret, const std::string& code,
                           const std::string& redirectUri, const std::string& codeVerifier,
                           OAuthToken* out, std::string* errorOut = nullptr,
-                          std::chrono::milliseconds timeout = std::chrono::milliseconds(10000));
+                          std::chrono::milliseconds timeout = std::chrono::milliseconds(10000),
+                          const std::string& resource = "",
+                          bool useClientSecretBasic = false);
 
     // Step 5: Refresh tokens
     void refreshToken(const std::string& tokenEndpoint, const std::string& clientId,

@@ -1131,7 +1131,27 @@ void McpClientSession::setElicitationHandler(ElicitationHandler handler) {
         if (!elicitCb) {
             return {{"action", "declined"}};
         }
-        return elicitCb(params);
+        json res = elicitCb(params);
+        if (res.contains("action") && res["action"] == "accept") {
+            if (!res.contains("content") || res["content"].is_null()) {
+                res["content"] = json::object();
+            }
+            if (params.contains("requestedSchema") && params["requestedSchema"].contains("properties")) {
+                auto props = params["requestedSchema"]["properties"];
+                if (props.is_object()) {
+                    for (auto it = props.begin(); it != props.end(); ++it) {
+                        std::string key = it.key();
+                        auto propVal = it.value();
+                        if (propVal.is_object() && propVal.contains("default")) {
+                            if (!res["content"].contains(key)) {
+                                res["content"][key] = propVal["default"];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return res;
     });
 }
 

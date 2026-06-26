@@ -305,7 +305,7 @@ void test_oauth_client() {
         mcp::OAuthServerMetadata metadata;
         metadata.authorizationEndpoint = "https://auth.example.com/authorize";
 
-        auto authReq = oauth.buildAuthorizationUrl(metadata, "client_id_123", {"openid", "profile"});
+        auto authReq = oauth.buildAuthorizationUrl(metadata, "client_id_123", "", {"openid", "profile"});
 
         TM_ASSERT_FALSE(authReq.authorizationUrl.empty(), "Authorization URL should not be empty");
         TM_ASSERT_FALSE(authReq.codeVerifier.empty(), "Code verifier should not be empty");

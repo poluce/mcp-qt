@@ -41,6 +41,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(curl)
 
+# Fetch cpp-httplib (header-only HTTP client, used for SSE GET on Windows)
+FetchContent_Declare(
+    cpp-httplib
+    URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
+)
+set(CPPHTTPLIB_OPENSSL_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(cpp-httplib)
+
 # SDK 核心库（纯 C++17，零外部框架依赖）
 add_subdirectory(mcp_core)
 

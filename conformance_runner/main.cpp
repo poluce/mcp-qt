@@ -42,6 +42,16 @@ static int runHttpMode(const std::string& serverUrl, const std::string& scenario
         std::cerr << "[Transport Error] " << err << std::endl;
     });
 
+    if (scenario == "elicitation-sep1034-client-defaults") {
+        session->setElicitationHandler([](const nlohmann::json& params) -> nlohmann::json {
+            std::cerr << "[Conformance] Elicitation invoked: " << params.dump() << std::endl;
+            return {
+                {"action", "accept"},
+                {"content", nlohmann::json::object()}
+            };
+        });
+    }
+
     session->init();
     if (!session->start()) {
         std::cerr << "[Conformance] Failed to start HTTP transport" << std::endl;
@@ -72,7 +82,7 @@ static int runHttpMode(const std::string& serverUrl, const std::string& scenario
         } else {
             std::cerr << "[Conformance] listed " << tools.size() << " tools" << std::endl;
         }
-    } else if (scenario == "tools_call" || scenario == "elicitation-sep1034-client-defaults") {
+    } else if (scenario == "tools_call" || scenario == "sse_retry" || scenario == "sse-retry" || scenario == "elicitation-sep1034-client-defaults") {
         nlohmann::json err;
         auto tools = session->listToolsSync(std::chrono::milliseconds(10000), &err);
         if (!err.empty()) {
@@ -193,6 +203,7 @@ static int runStdioMode(const std::string& scenario, const std::string& contextS
 }
 
 int main(int argc, char* argv[]) {
+    std::freopen("F:\\B_My_Document\\GitHub\\mcp-cpp-agent\\sdk_debug.log", "w", stderr);
     std::setvbuf(stdout, NULL, _IONBF, 0);
     std::setvbuf(stderr, NULL, _IONBF, 0);
 

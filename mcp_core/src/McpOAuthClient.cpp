@@ -6,6 +6,7 @@
 #include <thread>
 #include <future>
 #include <mutex>
+#include <iostream>
 
 #ifdef _WIN32
 #include <bcrypt.h>
@@ -15,6 +16,31 @@
 #endif
 
 namespace mcp {
+
+static std::string buildUrlEncodedBody(const json& j) {
+    std::string result;
+    CURL* curl = curl_easy_init();
+    if (!curl) return "";
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (!result.empty()) result += "&";
+        char* escKey = curl_easy_escape(curl, it.key().c_str(), static_cast<int>(it.key().length()));
+        std::string valStr;
+        if (it.value().is_string()) {
+            valStr = it.value().get<std::string>();
+        } else {
+            valStr = it.value().dump();
+        }
+        char* escVal = curl_easy_escape(curl, valStr.c_str(), static_cast<int>(valStr.length()));
+        
+        if (escKey && escVal) {
+            result += std::string(escKey) + "=" + std::string(escVal);
+        }
+        if (escKey) curl_free(escKey);
+        if (escVal) curl_free(escVal);
+    }
+    curl_easy_cleanup(curl);
+    return result;
+}
 
 // libcurl 全局初始化
 static std::once_flag g_oauthCurlInit;
@@ -166,41 +192,74 @@ McpOAuthClient::~McpOAuthClient() = default;
 // ===== Step 1: Metadata Discovery =====
 
 void McpOAuthClient::discoverMetadata(const std::string& serverUrl, MetadataCallback callback) {
-    // MCP 规范：从 serverUrl 派生 well-known URL
-    std::string metadataUrl = serverUrl;
-    if (metadataUrl.back() != '/') metadataUrl += '/';
-    metadataUrl += ".well-known/oauth-authorization-server";
+    std::thread([this, serverUrl, callback]() {
+        std::vector<std::string> urlsToTry;
 
-    std::thread([this, metadataUrl, callback]() {
-        std::string body = httpGet(metadataUrl);
-        if (body.empty()) {
-            callback(false, OAuthServerMetadata{}, "Failed to fetch metadata from " + metadataUrl);
-            return;
-        }
-        try {
-            json j = json::parse(body);
-            auto metadata = OAuthServerMetadata::fromJson(j);
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_metadata = metadata;
+        // 如果 URL 本身已经包含 .well-known（显式元数据路径），直接使用
+        if (serverUrl.find(".well-known") != std::string::npos) {
+            urlsToTry.push_back(serverUrl);
+        } else {
+            // 否则从 issuer URL 派生 well-known 路径
+            std::string baseUrl = serverUrl;
+            if (baseUrl.back() != '/') baseUrl += '/';
+            urlsToTry.push_back(baseUrl + ".well-known/oauth-authorization-server");
+            urlsToTry.push_back(baseUrl + ".well-known/openid-configuration");
+
+            // 如果 issuer URL 有路径前缀（如 /tenant1），也尝试 origin + well-known + pathPrefix
+            size_t pathStart = serverUrl.find("://");
+            if (pathStart != std::string::npos) {
+                pathStart = serverUrl.find('/', pathStart + 3);
+                if (pathStart != std::string::npos) {
+                    std::string origin = serverUrl.substr(0, pathStart);
+                    std::string pathPrefix = serverUrl.substr(pathStart);
+                    if (!pathPrefix.empty() && pathPrefix != "/") {
+                        if (pathPrefix.back() != '/') pathPrefix += '/';
+                        urlsToTry.push_back(origin + "/.well-known/oauth-authorization-server" + pathPrefix);
+                        urlsToTry.push_back(origin + "/.well-known/openid-configuration" + pathPrefix);
+                    }
+                }
             }
-            callback(true, metadata, "");
-        } catch (const std::exception& e) {
-            callback(false, OAuthServerMetadata{}, std::string("Failed to parse metadata: ") + e.what());
         }
+
+        for (const auto& metadataUrl : urlsToTry) {
+            std::cerr << "[SDK OAuth Debug] discoverMetadata: fetching from " << metadataUrl << std::endl;
+            std::string body = httpGet(metadataUrl);
+            if (!body.empty()) {
+                try {
+                    json j = json::parse(body);
+                    auto metadata = OAuthServerMetadata::fromJson(j);
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        m_metadata = metadata;
+                    }
+                    std::cerr << "[SDK OAuth Debug] discoverMetadata: success from " << metadataUrl << std::endl;
+                    callback(true, metadata, "");
+                    return;
+                } catch (const std::exception& e) {
+                    std::cerr << "[SDK OAuth Debug] discoverMetadata: parse failed for " << metadataUrl << ": " << e.what() << std::endl;
+                }
+            }
+        }
+        callback(false, OAuthServerMetadata{}, "Failed to fetch metadata from all well-known paths");
     }).detach();
 }
 
 bool McpOAuthClient::discoverMetadataSync(const std::string& serverUrl, OAuthServerMetadata* out,
                                            std::string* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, OAuthServerMetadata>>>();
-    auto fut = pr->get_future();
-    discoverMetadata(serverUrl, [pr](bool ok, const OAuthServerMetadata& m, const std::string&) {
-        pr->set_value({ok, m});
+    struct SyncData {
+        std::promise<std::pair<bool, OAuthServerMetadata>> pr;
+        std::string err;
+    };
+    auto sd = std::make_shared<SyncData>();
+    auto fut = sd->pr.get_future();
+    discoverMetadata(serverUrl, [sd](bool ok, const OAuthServerMetadata& m, const std::string& e) {
+        sd->err = e;
+        sd->pr.set_value({ok, m});
     });
     if (fut.wait_for(timeout) == std::future_status::ready) {
         auto res = fut.get();
         if (out) *out = res.second;
+        if (errorOut) *errorOut = sd->err;
         return res.first;
     }
     if (errorOut) *errorOut = "Metadata discovery timed out";
@@ -220,7 +279,9 @@ void McpOAuthClient::registerClient(const std::string& registrationEndpoint, con
     };
 
     std::thread([this, registrationEndpoint, reqStr = req.dump(), callback]() {
+        std::cerr << "[SDK OAuth Debug] registerClient: endpoint=" << registrationEndpoint << ", request=" << reqStr << std::endl;
         std::string body = httpPost(registrationEndpoint, reqStr);
+        std::cerr << "[SDK OAuth Debug] registerClient response=" << body << std::endl;
         if (body.empty()) {
             callback(false, OAuthClientRegistration{}, "Registration request failed");
             return;
@@ -242,14 +303,20 @@ void McpOAuthClient::registerClient(const std::string& registrationEndpoint, con
 bool McpOAuthClient::registerClientSync(const std::string& registrationEndpoint, const std::string& clientName,
                                          const std::vector<std::string>& redirectUris, OAuthClientRegistration* out,
                                          std::string* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, OAuthClientRegistration>>>();
-    auto fut = pr->get_future();
-    registerClient(registrationEndpoint, clientName, redirectUris, [pr](bool ok, const OAuthClientRegistration& r, const std::string&) {
-        pr->set_value({ok, r});
+    struct SyncData {
+        std::promise<std::pair<bool, OAuthClientRegistration>> pr;
+        std::string err;
+    };
+    auto sd = std::make_shared<SyncData>();
+    auto fut = sd->pr.get_future();
+    registerClient(registrationEndpoint, clientName, redirectUris, [sd](bool ok, const OAuthClientRegistration& r, const std::string& e) {
+        sd->err = e;
+        sd->pr.set_value({ok, r});
     });
     if (fut.wait_for(timeout) == std::future_status::ready) {
         auto res = fut.get();
         if (out) *out = res.second;
+        if (errorOut) *errorOut = sd->err;
         return res.first;
     }
     if (errorOut) *errorOut = "Client registration timed out";
@@ -259,7 +326,8 @@ bool McpOAuthClient::registerClientSync(const std::string& registrationEndpoint,
 // ===== Step 3: Build Authorization URL =====
 
 McpOAuthClient::AuthRequest McpOAuthClient::buildAuthorizationUrl(
-    const OAuthServerMetadata& metadata, const std::string& clientId, const std::vector<std::string>& scopes) {
+    const OAuthServerMetadata& metadata, const std::string& clientId, const std::string& redirectUri,
+    const std::vector<std::string>& scopes, const std::string& resource) {
     AuthRequest req;
     req.codeVerifier = generateCodeVerifier();
     req.codeChallenge = computeCodeChallenge(req.codeVerifier);
@@ -286,6 +354,30 @@ McpOAuthClient::AuthRequest McpOAuthClient::buildAuthorizationUrl(
     if (!encodedScope.empty()) {
         req.authorizationUrl += "&scope=" + encodedScope;
     }
+    if (!redirectUri.empty()) {
+        CURL* curl = curl_easy_init();
+        if (curl) {
+            char* escaped = curl_easy_escape(curl, redirectUri.c_str(), static_cast<int>(redirectUri.length()));
+            if (escaped) {
+                req.authorizationUrl += "&redirect_uri=" + std::string(escaped);
+                curl_free(escaped);
+            }
+            curl_easy_cleanup(curl);
+        }
+    }
+
+    // RFC 8707: resource parameter
+    if (!resource.empty()) {
+        CURL* curl = curl_easy_init();
+        if (curl) {
+            char* escaped = curl_easy_escape(curl, resource.c_str(), static_cast<int>(resource.length()));
+            if (escaped) {
+                req.authorizationUrl += "&resource=" + std::string(escaped);
+                curl_free(escaped);
+            }
+            curl_easy_cleanup(curl);
+        }
+    }
 
     return req;
 }
@@ -295,20 +387,55 @@ McpOAuthClient::AuthRequest McpOAuthClient::buildAuthorizationUrl(
 void McpOAuthClient::exchangeCode(const std::string& tokenEndpoint, const std::string& clientId,
                                    const std::string& clientSecret, const std::string& code,
                                    const std::string& redirectUri, const std::string& codeVerifier,
-                                   TokenCallback callback) {
+                                   TokenCallback callback, const std::string& resource,
+                                   bool useClientSecretBasic) {
     json body = {
         {"grant_type", "authorization_code"},
         {"code", code},
         {"redirect_uri", redirectUri},
-        {"client_id", clientId},
         {"code_verifier", codeVerifier}
     };
-    if (!clientSecret.empty()) {
-        body["client_secret"] = clientSecret;
+    // client_secret_basic: 通过 HTTP Basic Auth 发送凭据，不在 body 中包含
+    if (!useClientSecretBasic) {
+        body["client_id"] = clientId;
+        if (!clientSecret.empty()) {
+            body["client_secret"] = clientSecret;
+        }
+    }
+    // RFC 8707: resource parameter
+    if (!resource.empty()) {
+        body["resource"] = resource;
     }
 
-    std::thread([this, tokenEndpoint, bodyStr = body.dump(), callback]() {
-        std::string resp = httpPost(tokenEndpoint, bodyStr, "application/x-www-form-urlencoded");
+    std::thread([this, tokenEndpoint, bodyStr = buildUrlEncodedBody(body), callback, useClientSecretBasic, clientId, clientSecret]() {
+        std::cerr << "[SDK OAuth Debug] exchangeCode: tokenEndpoint=" << tokenEndpoint << ", body=" << bodyStr << " basic=" << useClientSecretBasic << std::endl;
+        std::string resp;
+        if (useClientSecretBasic) {
+            // client_secret_basic: 使用 HTTP Basic Auth 发送凭据
+            ensureOAuthCurlInit();
+            CURL* curl = curl_easy_init();
+            if (curl) {
+                curl_easy_setopt(curl, CURLOPT_URL, tokenEndpoint.c_str());
+                curl_easy_setopt(curl, CURLOPT_POST, 1L);
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(bodyStr.size()));
+                curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+                std::string userpwd = clientId + ":" + clientSecret;
+                curl_easy_setopt(curl, CURLOPT_USERPWD, userpwd.c_str());
+                struct curl_slist* hdrs = nullptr;
+                hdrs = curl_slist_append(hdrs, "Content-Type: application/x-www-form-urlencoded");
+                hdrs = curl_slist_append(hdrs, "Accept: application/json");
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, oauthWriteCallback);
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+                curl_easy_perform(curl);
+                curl_slist_free_all(hdrs);
+                curl_easy_cleanup(curl);
+            }
+        } else {
+            resp = httpPost(tokenEndpoint, bodyStr, "application/x-www-form-urlencoded");
+        }
+        std::cerr << "[SDK OAuth Debug] exchangeCode response=" << resp << std::endl;
         if (resp.empty()) {
             callback(false, OAuthToken{}, "Token exchange request failed");
             return;
@@ -342,16 +469,23 @@ void McpOAuthClient::exchangeCode(const std::string& tokenEndpoint, const std::s
 bool McpOAuthClient::exchangeCodeSync(const std::string& tokenEndpoint, const std::string& clientId,
                                        const std::string& clientSecret, const std::string& code,
                                        const std::string& redirectUri, const std::string& codeVerifier,
-                                       OAuthToken* out, std::string* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, OAuthToken>>>();
-    auto fut = pr->get_future();
+                                       OAuthToken* out, std::string* errorOut, std::chrono::milliseconds timeout,
+                                       const std::string& resource, bool useClientSecretBasic) {
+    struct SyncData {
+        std::promise<std::pair<bool, OAuthToken>> pr;
+        std::string err;
+    };
+    auto sd = std::make_shared<SyncData>();
+    auto fut = sd->pr.get_future();
     exchangeCode(tokenEndpoint, clientId, clientSecret, code, redirectUri, codeVerifier,
-                 [pr](bool ok, const OAuthToken& t, const std::string&) {
-        pr->set_value({ok, t});
-    });
+                 [sd](bool ok, const OAuthToken& t, const std::string& e) {
+        sd->err = e;
+        sd->pr.set_value({ok, t});
+    }, resource, useClientSecretBasic);
     if (fut.wait_for(timeout) == std::future_status::ready) {
         auto res = fut.get();
         if (out) *out = res.second;
+        if (errorOut) *errorOut = sd->err;
         return res.first;
     }
     if (errorOut) *errorOut = "Token exchange timed out";
@@ -373,8 +507,10 @@ void McpOAuthClient::refreshToken(const std::string& tokenEndpoint, const std::s
     }
 
     std::string rtv = refreshTokenValue;
-    std::thread([this, tokenEndpoint, bodyStr = body.dump(), callback, rtv]() {
+    std::thread([this, tokenEndpoint, bodyStr = buildUrlEncodedBody(body), callback, rtv]() {
+        std::cerr << "[SDK OAuth Debug] refreshToken: tokenEndpoint=" << tokenEndpoint << ", body=" << bodyStr << std::endl;
         std::string resp = httpPost(tokenEndpoint, bodyStr, "application/x-www-form-urlencoded");
+        std::cerr << "[SDK OAuth Debug] refreshToken response=" << resp << std::endl;
         if (resp.empty()) {
             callback(false, OAuthToken{}, "Token refresh request failed");
             return;
@@ -408,15 +544,21 @@ void McpOAuthClient::refreshToken(const std::string& tokenEndpoint, const std::s
 bool McpOAuthClient::refreshTokenSync(const std::string& tokenEndpoint, const std::string& clientId,
                                        const std::string& clientSecret, const std::string& refreshTokenValue,
                                        OAuthToken* out, std::string* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, OAuthToken>>>();
-    auto fut = pr->get_future();
+    struct SyncData {
+        std::promise<std::pair<bool, OAuthToken>> pr;
+        std::string err;
+    };
+    auto sd = std::make_shared<SyncData>();
+    auto fut = sd->pr.get_future();
     refreshToken(tokenEndpoint, clientId, clientSecret, refreshTokenValue,
-                 [pr](bool ok, const OAuthToken& t, const std::string&) {
-        pr->set_value({ok, t});
+                 [sd](bool ok, const OAuthToken& t, const std::string& e) {
+        sd->err = e;
+        sd->pr.set_value({ok, t});
     });
     if (fut.wait_for(timeout) == std::future_status::ready) {
         auto res = fut.get();
         if (out) *out = res.second;
+        if (errorOut) *errorOut = sd->err;
         return res.first;
     }
     if (errorOut) *errorOut = "Token refresh timed out";
