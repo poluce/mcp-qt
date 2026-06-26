@@ -13,13 +13,14 @@ add_executable(app
 
 target_include_directories(app PRIVATE
     include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../mcp_core/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../mcp_qt/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../mcp_core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../extensions/qt/include
 )
 
 target_link_libraries(app PRIVATE
     mcp_qt
     mcp_core
+    Qt6::Core
     Qt6::Widgets
     Qt6::Network
 )

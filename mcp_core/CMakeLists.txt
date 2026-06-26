@@ -1,8 +1,15 @@
 add_library(mcp_core STATIC
     include/mcp_core/ConsoleStdioTransport.h
+    include/mcp_core/SubprocessStdioTransport.h
+    include/mcp_core/mcp_core.h
     src/ConsoleStdioTransport.cpp
+    src/SubprocessStdioTransport.cpp
     src/JsonRpcDispatcher.cpp
     src/McpClientSession.cpp
+)
+
+target_compile_options(mcp_core PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
 target_include_directories(mcp_core PUBLIC

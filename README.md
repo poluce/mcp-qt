@@ -1,58 +1,181 @@
 # mcp-cpp-agent
 
-基于 C++17 和 Qt6 开发的模块化 **Model Context Protocol (MCP) 客户端调试器**。
+纯 C++17 实现的 **Model Context Protocol (MCP) 客户端 SDK**。
 
-此项目实现了精简、坚固的 MCP 客户端核心，并以直观的 GUI 调试面板呈现出 JSON-RPC 通信流程。
+零外部框架依赖，通过 CMake FetchContent 一行集成，即可连接任意 MCP 服务端完成 initialize 握手、Tool/Resource/Prompt 调用等全部协议操作。
 
 ---
 
-## 🛠 架构设计 (Architecture Layout)
+## 快速集成
+
+在你的 `CMakeLists.txt` 中：
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    mcp_sdk
+    GIT_REPOSITORY https://github.com/yourname/mcp-cpp-agent.git
+    GIT_TAG        main
+)
+FetchContent_MakeAvailable(mcp_sdk)
+
+target_link_libraries(your_app PRIVATE mcp::mcp_core)
+```
+
+---
+
+## 极简示例
+
+```cpp
+#include <mcp_core/mcp_core.h>
+#include <iostream>
+
+int main() {
+    // 以 Stdio 方式启动 MCP 服务端子进程
+    auto transport = std::make_shared<mcp::SubprocessStdioTransport>(
+        "node", {"/path/to/mcp-server.js"});
+
+    auto session = std::make_shared<mcp::McpClientSession>(transport);
+    session->init();
+    session->start();
+
+    // 同步阻塞 API：初始化握手
+    bool ok = session->initializeSync("my-app", "1.0.0");
+    if (!ok) { std::cerr << "握手失败\n"; return 1; }
+
+    // 同步阻塞 API：列举工具
+    auto tools = session->listToolsSync();
+    for (const auto& t : tools) {
+        std::cout << "Tool: " << t.name << " — " << t.description << "\n";
+    }
+
+    // 同步阻塞 API：调用工具
+    mcp::json args = {{"path", "/tmp/test.txt"}};
+    auto result = session->callToolSync("read_file", args);
+    std::cout << "Result: " << result.dump(2) << "\n";
+
+    session->shutdownSync();
+    return 0;
+}
+```
+
+---
+
+## API 概览
+
+### 核心类
+
+| 类 | 说明 |
+|---|---|
+| `McpClientSession` | MCP 客户端会话管理器，跟踪请求、分发消息 |
+| `IMcpTransport` | 传输层纯虚接口，可自行扩展 |
+| `SubprocessStdioTransport` | 纯 C++ 子进程 Stdio 传输（内置） |
+| `ConsoleStdioTransport` | 从当前进程 stdin/stdout 读写（用于 conformance 测试） |
+| `McpTool` | 工具元数据结构体（name, description, inputSchema） |
+
+### API 风格
+
+`McpClientSession` 提供三套 API 风格，覆盖不同场景：
+
+**1. 异步回调** — 适合事件循环驱动的应用
+```cpp
+session->listTools([](const std::vector<mcp::McpTool>& tools, const mcp::json& err) {
+    // 回调处理
+});
+```
+
+**2. 同步阻塞** — 适合脚本或简单场景
+```cpp
+auto tools = session->listToolsSync(timeout);
+auto result = session->callToolSync("tool_name", args);
+```
+
+**3. Raw 字符串** — 解耦 nlohmann/json，适合跨语言绑定
+```cpp
+session->callToolRaw("tool_name", R"({"key":"value"})", 
+    [](const std::string& result, const std::string& error) { ... });
+```
+
+### 协议操作
+
+| 操作 | 异步 | 同步 |
+|------|------|------|
+| 初始化握手 | `initialize()` | `initializeSync()` |
+| 安全关闭 | `shutdown()` | `shutdownSync()` |
+| 列举工具 | `listTools()` | `listToolsSync()` |
+| 调用工具 | `callTool()` | `callToolSync()` |
+| 列举资源 | `listResources()` | `listResourcesSync()` |
+| 读取资源 | `readResource()` | `readResourceSync()` |
+| 列举提示词 | `listPrompts()` | `listPromptsSync()` |
+| 获取提示词 | `getPrompt()` | `getPromptSync()` |
+
+---
+
+## 自定义传输层
+
+实现 `IMcpTransport` 接口即可接入任意传输协议（WebSocket、gRPC、共享内存等）：
+
+```cpp
+class MyTransport : public mcp::IMcpTransport {
+public:
+    bool send(const std::string& message) override;
+    void setOnMessage(std::function<void(const std::string&)> callback) override;
+    void setOnClose(std::function<void()> callback) override;
+    void setOnError(std::function<void(const std::string&)> callback) override;
+    bool start() override;
+    void close() override;
+};
+```
+
+---
+
+## 构建选项
+
+| CMake 选项 | 默认值 | 说明 |
+|------------|--------|------|
+| `MCP_ENABLE_QT` | `OFF` | 启用 Qt6 传输扩展和调试器示例 |
+
+```bash
+# 仅构建 SDK（零外部依赖）
+cmake -B build
+
+# 启用 Qt 扩展 + 调试器示例
+cmake -B build -DMCP_ENABLE_QT=ON -DCMAKE_PREFIX_PATH="/path/to/qt6"
+```
+
+---
+
+## 项目结构
 
 ```
 mcp-cpp-agent/
- ├── mcp_core/                  // 纯 C++17 内核 (不依赖任何 GUI/平台框架)
- │    ├── McpClientSession      // 跟踪异步请求、分发消息
- │    ├── JsonRpcDispatcher     // JSON-RPC 2.0 协议解析与分发
- │    └── IMcpTransport         // 纯虚传输协议接口 (send/recv)
+ ├── mcp_core/                 # SDK 核心库（纯 C++17）
+ │    ├── include/mcp_core/
+ │    │    ├── mcp_core.h               # 一站式头文件
+ │    │    ├── McpClientSession.h        # 会话管理
+ │    │    ├── IMcpTransport.h           # 传输层接口
+ │    │    ├── SubprocessStdioTransport.h# 子进程 Stdio 传输
+ │    │    ├── McpTool.h                 # 工具数据结构
+ │    │    ├── McpMessage.h              # JSON-RPC 消息结构
+ │    │    └── JsonRpcDispatcher.h       # 协议分发器
+ │    └── src/
  │
- ├── mcp_qt/                    // Qt 适配层 (依赖 Qt6 Core & Network)
- │    ├── QtStdioTransport     // 客户端利用 QProcess 重定向子进程的 stdio 通道
- │    ├── QtHttpTransport      // 支持以 HTTP/SSE (Server Sent Events) 与远程服务端建连
- │    └── QtMcpClient           // QObject 包装层，提供标准 Qt 信号与槽
+ ├── extensions/qt/            # Qt6 可选扩展
+ │    ├── include/mcp_qt/               # QtStdioTransport, QtHttpTransport, QtMcpClient
+ │    └── src/
  │
- └── app/                       // 独立 UI 调试程序
-      ├── AgentController       // 核心与界面间的中控调度
-      ├── ToolManager           // 缓存并管理发现的 Tools
-      └── ChatWindow            // Slate Dark 暗黑精致调试界面
+ ├── examples/
+ │    └── debugger/            # Qt GUI 调试面板示例
+ │
+ ├── tests/                    # 测试用例
+ ├── conformance_runner/       # 协议一致性测试
+ └── CMakeLists.txt
 ```
 
 ---
 
-## 🚀 编译与运行 (Compilation)
+## 依赖
 
-根据 **编译隔离原则 (Out-of-source Build)**，请始终在独立目录中编译，不要污染源码目录：
-
-### 1. 命令行编译 (以 MinGW + CMake 为例)
-
-打开命令行并确保 CMake 与编译器在 `PATH` 中：
-
-```powershell
-# 1. 新建并进入 build 目录
-mkdir build
-cd build
-
-# 2. 配置 CMake 并指向 Qt6 安装位置 (若未在全局环境变量中)
-cmake .. -DCMAKE_PREFIX_PATH="E:/Qt6/6.11.0/mingw_64"
-
-# 3. 编译
-cmake --build . --config Release
-```
-
-### 2. 运行调试器
-
-编译完成后，运行 `app.exe`。您可以通过以下两种方式调试您的 MCP 服务端：
-
-1. **Stdio 方式**：选择 `Stdio`，输入运行命令（例如，如果是 node 开发的 server 可以输入 `node`，参数输入 `C:/path/to/server.js`），点击 `Connect`。程序将作为子进程拉起它，并完成 MCP `initialize` 握手。
-2. **HTTP/SSE 方式**：选择 `HTTP / SSE`，输入服务器的 SSE 地址，点击 `Connect`，程序将动态配置 POST 终结点并拉取工具列表。
-
-当成功握手后，可在左下角 **Tool Invoker** 中查看服务器提供的所有 Tool，并会自动根据 Schema 生成参数的 JSON 模板，点击 `Call Tool` 即可在右侧查看 JSON-RPC 的交互明细日志。
+- **SDK 核心**：C++17 编译器 + nlohmann/json（自动 FetchContent）
+- **Qt 扩展**（可选）：Qt6 Core & Network
+- **调试器示例**（可选）：Qt6 Widgets

@@ -4,12 +4,7 @@ project(mcp-cpp-agent LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Enable automatic compilation of Qt Meta-Object Compiler, User Interface Compiler and Resource Compiler
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON)
-
-# Fetch nlohmann/json (extremely lightweight single-header JSON library)
+# Fetch nlohmann/json (single-header JSON library)
 include(FetchContent)
 FetchContent_Declare(
     json
@@ -17,11 +12,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
-# Find Qt6 Components
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
-
-# Add subdirectories for components
+# SDK 核心库（纯 C++17，零外部框架依赖）
 add_subdirectory(mcp_core)
-add_subdirectory(mcp_qt)
-add_subdirectory(app)
-add_subdirectory(conformance_runner)
+
+# 可选：Qt 扩展层（需要 Qt6）
+option(MCP_ENABLE_QT "Build Qt transport extensions and debugger example" OFF)
+
+if(MCP_ENABLE_QT)
+    set(CMAKE_AUTOMOC ON)
+    set(CMAKE_AUTOUIC ON)
+    set(CMAKE_AUTORCC ON)
+
+    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
+
+    add_subdirectory(extensions/qt)
+    add_subdirectory(examples/debugger)
+
+    # 协议一致性测试（依赖 Qt 的 http transport 测试）
+    add_subdirectory(conformance_runner)
+endif()
