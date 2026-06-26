@@ -17,3 +17,4 @@ lib/
 Thumbs.db
 Desktop.ini
 .DS_Store
+build_sdk

@@ -2,7 +2,7 @@
 #include <cstdlib>
 
 void runAllLocalTests() {
-    TmTestRunner::instance().startTestSuite("C++ MCP SDK Modular Integration Test Suite");
+    TmTestRunner::instance().startTestSuite("C++ MCP SDK Standalone Test Suite");
 
     // 1. Protocol Tests
     TmTestRunner::instance().startTestSuite("Protocol Tests");
@@ -11,10 +11,9 @@ void runAllLocalTests() {
     TM_RUN_TEST(test_capabilities);
     TM_RUN_TEST(test_error_response);
 
-    // 2. Transport Tests
+    // 2. Transport Tests (仅纯 C++17 测试)
     TmTestRunner::instance().startTestSuite("Transport Tests");
     TM_RUN_TEST(test_stdio_transport);
-    TM_RUN_TEST(test_http_transport);
     TM_RUN_TEST(test_process_lifecycle);
 
     // 3. Feature Tests
@@ -29,18 +28,17 @@ void runAllLocalTests() {
     TM_RUN_TEST(test_elicitation);
     TM_RUN_TEST(test_tool_annotations);
 
-    // 4. Integration Tests
-    TmTestRunner::instance().startTestSuite("Integration Tests");
-    TM_RUN_TEST(test_with_filesystem_server);
-    TM_RUN_TEST(test_with_anysearch_mcp);
-    TM_RUN_TEST(test_with_inspector_cases);
-
     TmTestRunner::instance().printSummary();
-    
+
     if (TmTestRunner::instance().hasFailed()) {
-        std::cerr << "\n❌ Some tests FAILED!\n";
+        std::cerr << "\n Some tests FAILED!\n";
         std::exit(1);
     } else {
-        std::cout << "\n🎉 🎉 🎉 All Modular Self-Tests PASSED!\n";
+        std::cout << "\n All Standalone Tests PASSED!\n";
     }
+}
+
+int main() {
+    runAllLocalTests();
+    return 0;
 }

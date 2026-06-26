@@ -9,6 +9,8 @@
 #include "IMcpTransport.h"
 #include "McpMessage.h"
 #include "McpTool.h"
+#include "McpResource.h"
+#include "McpPrompt.h"
 
 namespace mcp {
 
@@ -165,6 +167,28 @@ public:
      */
     void getPrompt(const std::string& name, const json& arguments, std::function<void(const json& result, const json& error)> callback);
 
+    /**
+     * @brief Send a ping request to the server to check connectivity.
+     */
+    void ping(std::function<void(bool success, const json& error)> callback);
+
+    /**
+     * @brief List resource templates exposed by the MCP server.
+     */
+    void listResourceTemplates(std::function<void(const std::vector<McpResourceTemplate>& templates, const json& error)> callback);
+
+    /**
+     * @brief List resource templates with pagination cursor.
+     */
+    void listResourceTemplates(const std::string& cursor, std::function<void(const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error)> callback);
+
+    /**
+     * @brief Request auto-completion suggestions from the server.
+     * @param ref Reference to the resource template or prompt being completed.
+     * @param argument The argument name and partial value for completion.
+     */
+    void complete(const json& ref, const json& argument, std::function<void(const json& completion, const json& error)> callback);
+
     // ==========================================
     // Synchronous Blocking APIs (Helper wrappers)
     // ==========================================
@@ -203,6 +227,17 @@ public:
     json getPromptSync(const std::string& name, const json& arguments,
                        json* errorOut = nullptr,
                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
+    bool pingSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
+
+    std::vector<McpResourceTemplate> listResourceTemplatesSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
+
+    std::vector<McpResourceTemplate> listResourceTemplatesSync(const std::string& cursor, std::string* nextCursorOut,
+                                                               std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
+
+    json completeSync(const json& ref, const json& argument,
+                      json* errorOut = nullptr,
+                      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
     // ==========================================
     // Raw String APIs (Uncoupled from nlohmann/json)

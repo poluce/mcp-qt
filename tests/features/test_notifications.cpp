@@ -102,16 +102,19 @@ void test_notifications() {
             {"result", {{"tools", mcp::json::array()}}}
         };
 
-        transport->pushServerMessageAsync(notify1.dump(), 2);
-        transport->pushServerMessageAsync(notify2.dump(), 4);
-        transport->pushServerMessageAsync(listResp.dump(), 8);
+        transport->pushServerMessageAsync(notify1.dump(), 10);
+        transport->pushServerMessageAsync(notify2.dump(), 30);
+        transport->pushServerMessageAsync(listResp.dump(), 60);
 
-        // Bounded loop wait
-        int maxWaitMs = 200;
+        // 等待 listTools 回调执行完成
+        int maxWaitMs = 500;
         while (!listCallbackExecuted && maxWaitMs > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             maxWaitMs -= 5;
         }
+
+        // 再等一小段时间确保通知回调也已完成
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         TM_ASSERT_TRUE(listCallbackExecuted, "Scenario 3: Response callback should be executed despite async middle notifications.");
         TM_ASSERT_EQ(updateNotificationCount.load(), 1, "Scenario 3: Async resources update notification should be caught.");

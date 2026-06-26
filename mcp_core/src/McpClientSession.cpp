@@ -233,7 +233,8 @@ void McpClientSession::initialize(const std::string& clientName, const std::stri
         {"protocolVersion", MCP_PROTOCOL_VERSION},
         {"capabilities", {
             {"roots", {{"listChanged", false}}},
-            {"sampling", json::object()}
+            {"sampling", json::object()},
+            {"elicitation", {{"modes", {"form", "url"}}}}
         }},
         {"clientInfo", {
             {"name", clientName},
@@ -840,6 +841,168 @@ std::string McpClientSession::callToolSyncRaw(const std::string& name, const std
     }
     if (errorJsonOut) *errorJsonOut = "{\"code\":-32001,\"message\":\"Synchronous callToolRaw timed out\"}";
     return "{}";
+}
+
+// ==========================================
+// Ping
+// ==========================================
+
+void McpClientSession::ping(std::function<void(bool success, const json& error)> callback) {
+    if (m_state != SessionState::Initialized) {
+        json err = {
+            {"code", -32002},
+            {"message", "Session not initialized"}
+        };
+        callback(false, err);
+        return;
+    }
+    sendRequest("ping", json::object(), [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback(false, error);
+        } else {
+            callback(true, json::object());
+        }
+    });
+}
+
+bool McpClientSession::pingSync(std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
+    auto fut = pr->get_future();
+    ping([pr](bool success, const json& error) {
+        pr->set_value({success, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous ping timed out"}};
+    return false;
+}
+
+// ==========================================
+// Resource Templates
+// ==========================================
+
+void McpClientSession::listResourceTemplates(std::function<void(const std::vector<McpResourceTemplate>& templates, const json& error)> callback) {
+    listResourceTemplates("", [callback](const std::vector<McpResourceTemplate>& templates, const std::string&, const json& error) {
+        callback(templates, error);
+    });
+}
+
+void McpClientSession::listResourceTemplates(const std::string& cursor, std::function<void(const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error)> callback) {
+    if (m_state != SessionState::Initialized) {
+        json err = {
+            {"code", -32002},
+            {"message", "Session not initialized"}
+        };
+        callback({}, "", err);
+        return;
+    }
+    json params = json::object();
+    if (!cursor.empty()) {
+        params["cursor"] = cursor;
+    }
+    sendRequest("resources/templates/list", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback({}, "", error);
+        } else {
+            std::vector<McpResourceTemplate> templates;
+            bool parseOk = true;
+            if (result.contains("resourceTemplates") && result["resourceTemplates"].is_array()) {
+                for (const auto& item : result["resourceTemplates"]) {
+                    try {
+                        templates.push_back(McpResourceTemplate::fromJson(item));
+                    } catch (...) {
+                        parseOk = false;
+                    }
+                }
+            }
+            if (!parseOk) {
+                templates.clear();
+            }
+            std::string nextCursor;
+            if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
+                nextCursor = result["nextCursor"].get<std::string>();
+            }
+            callback(templates, nextCursor, json::object());
+        }
+    });
+}
+
+std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<std::vector<McpResourceTemplate>, json>>>();
+    auto fut = pr->get_future();
+    listResourceTemplates([pr](const std::vector<McpResourceTemplate>& templates, const json& error) {
+        pr->set_value({templates, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listResourceTemplates timed out"}};
+    return {};
+}
+
+std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(const std::string& cursor, std::string* nextCursorOut,
+                                                                             std::chrono::milliseconds timeout, json* errorOut) {
+    struct ListTemplatesResult {
+        std::vector<McpResourceTemplate> templates;
+        std::string nextCursor;
+        json error;
+    };
+    auto pr = std::make_shared<std::promise<ListTemplatesResult>>();
+    auto fut = pr->get_future();
+    listResourceTemplates(cursor, [pr](const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error) {
+        pr->set_value({templates, nextCursor, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (nextCursorOut) *nextCursorOut = res.nextCursor;
+        if (errorOut) *errorOut = res.error;
+        return res.templates;
+    }
+    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listResourceTemplates with cursor timed out"}};
+    return {};
+}
+
+// ==========================================
+// Completion (auto-complete)
+// ==========================================
+
+void McpClientSession::complete(const json& ref, const json& argument, std::function<void(const json& completion, const json& error)> callback) {
+    if (m_state != SessionState::Initialized) {
+        json err = {
+            {"code", -32002},
+            {"message", "Session not initialized"}
+        };
+        callback(json::object(), err);
+        return;
+    }
+    json params = {
+        {"ref", ref},
+        {"argument", argument}
+    };
+    sendRequest("completion/complete", params, [callback](const json& result, const json& error) {
+        callback(result, error);
+    });
+}
+
+json McpClientSession::completeSync(const json& ref, const json& argument,
+                                    json* errorOut, std::chrono::milliseconds timeout) {
+    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
+    auto fut = pr->get_future();
+    complete(ref, argument, [pr](const json& completion, const json& error) {
+        pr->set_value({completion, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous complete timed out"}};
+    return json::object();
 }
 
 void McpClientSession::setLogCallback(LogCallback callback) {

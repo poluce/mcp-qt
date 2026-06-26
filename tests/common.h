@@ -256,6 +256,11 @@ void test_tools();
 void test_resources();
 void test_prompts();
 void test_notifications();
+void test_ping();
+void test_resource_templates();
+void test_complete();
+void test_elicitation();
+void test_tool_annotations();
 
 void test_with_filesystem_server();
 void test_with_anysearch_mcp();
