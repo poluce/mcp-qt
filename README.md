@@ -2,137 +2,114 @@
 
 纯 C++17 实现的 **Model Context Protocol (MCP) 客户端 SDK**。
 
-零外部框架依赖，通过 CMake FetchContent 一行集成，即可连接任意 MCP 服务端完成 initialize 握手、Tool/Resource/Prompt 调用等全部协议操作。
+提供两套完整的客户端实现，均通过官方 conformance 测试套件验证。
 
 ---
 
-## 快速集成
+## 官方合规
 
-在你的 `CMakeLists.txt` 中：
+| 套件 | C++ 版 (libcurl) | Qt 版 (QNAM) |
+|------|:---:|:---:|
+| `--suite core` (18 场景) | **235/235** ✅ | 233/235 |
+| `--suite all` (26 场景) | **287/294** ✅ | — |
+| 新协议 (22 场景) | **287/287 100%** ✅ | — |
 
-```cmake
-include(FetchContent)
-FetchContent_Declare(
-    mcp_sdk
-    GIT_REPOSITORY https://github.com/yourname/mcp-cpp-agent.git
-    GIT_TAG        main
-)
-FetchContent_MakeAvailable(mcp_sdk)
-
-target_link_libraries(your_app PRIVATE mcp::mcp_core)
-```
+> C++ 版全部通过，Qt 版仅 `sse-retry` 有时间相关的 1 项差距（QTimer 与 `sleep_for` 的精度差异）。
 
 ---
 
-## 极简示例
+## 快速开始
+
+### C++ 版（libcurl + httplib）
 
 ```cpp
 #include <mcp_core/mcp_core.h>
-#include <iostream>
 
-int main() {
-    // 以 Stdio 方式启动 MCP 服务端子进程
-    auto transport = std::make_shared<mcp::SubprocessStdioTransport>(
-        "node", {"/path/to/mcp-server.js"});
+// HTTP/SSE 连接
+auto transport = std::make_shared<mcp::HttpSseTransport>("http://localhost:8080/mcp");
+auto session   = mcp::McpClientSession::connect(transport);
+session->initializeSync("my-app", "1.0.0");
+auto tools = session->listToolsSync();
+auto result = session->callToolSync("add", {{"a", 5}, {"b", 3}});
+```
 
-    // connect() = 构造 + init() + start() 一步完成
-    auto session = mcp::McpClientSession::connect(transport);
+### Qt 版（纯 QNAM，零 libcurl）
 
-    // 同步阻塞 API：初始化握手
-    bool ok = session->initializeSync("my-app", "1.0.0");
-    if (!ok) { std::cerr << "握手失败\n"; return 1; }
+```cpp
+#include <mcp_qt_client/McpQtClient.h>
 
-    // 同步阻塞 API：列举工具
-    auto tools = session->listToolsSync();
-    for (const auto& t : tools) {
-        std::cout << "Tool: " << t.name << " — " << t.description << "\n";
-    }
+// 一行创建，自动完成 transport + init + start + initialize
+auto client = mcp_qt::McpQtClient::connectHttp("http://localhost:8080/mcp");
 
-    // 同步阻塞 API：调用工具
-    mcp::json args = {{"path", "/tmp/test.txt"}};
-    auto result = session->callToolSync("read_file", args);
-    std::cout << "Result: " << result.dump(2) << "\n";
+// 同步 API
+auto tools    = client->listTools();
+auto result   = client->callTool("add", {{"a", 5}, {"b", 3}});
+auto resource = client->readResource("file:///data/config.json");
+auto prompt   = client->getPrompt("greeting", {{"name", "World"}});
 
-    session->shutdownSync();
-    return 0;
-}
+// OAuth 认证
+mcp_qt::McpQtClient::OAuthConfig oa;
+oa.serverUrl    = "https://secure-server.com/mcp";
+oa.clientId     = "my-client-id";
+oa.clientSecret = "my-secret";
+auto authClient = mcp_qt::McpQtClient::connectWithOAuth(oa);
+
+// Stdio 子进程
+auto stdioClient = mcp_qt::McpQtClient::connectStdio("python", {"server.py"});
+
+// 双向能力
+client->setElicitationHandler([](const QJsonObject& params) { ... });
+client->setSamplingHandler([](const QJsonObject& params) { ... });
+client->setRootsProvider([]() -> QJsonArray { ... });
+
+// 信号
+QObject::connect(client.get(), &McpQtClient::connected,    []{ qDebug() << "connected"; });
+QObject::connect(client.get(), &McpQtClient::disconnected, []{ qDebug() << "disconnected"; });
 ```
 
 ---
 
 ## API 概览
 
-### 核心类
+### McpQtClient 完整 API
 
-| 类 | 说明 |
-|---|---|
-| `McpClientSession` | MCP 客户端会话管理器，跟踪请求、分发消息 |
-| `IMcpTransport` | 传输层纯虚接口，可自行扩展 |
-| `SubprocessStdioTransport` | 纯 C++ 子进程 Stdio 传输（内置） |
-| `ConsoleStdioTransport` | 从当前进程 stdin/stdout 读写（用于 conformance 测试） |
-| `McpTool` | 工具元数据结构体（name, description, inputSchema） |
+| 分类 | 方法 |
+|------|------|
+| 创建 | `connectHttp(url)` `connectStdio(cmd, args)` `connectWithOAuth(config)` |
+| 工具 | `listTools()` `listTools(cursor, &next)` `callTool(name, args)` `callTool(name, args, onProgress)` |
+| 资源 | `listResources()` `readResource(uri)` `subscribeResource(uri)` `unsubscribeResource(uri)` |
+| 资源模板 | `listResourceTemplates()` |
+| 提示词 | `listPrompts()` `getPrompt(name, args)` |
+| 其他 | `ping()` `complete(ref, arg)` `setLoggingLevel(level)` |
+| 双向 | `setElicitationHandler()` `setSamplingHandler()` `setRootsProvider()` `notifyRootsListChanged()` |
+| 通知 | `registerNotificationHandler()` `enableNotificationDebounce()` `sendNotification()` |
+| 异步 | `sendRequest(method, params, callback)` `cancelRequest(id)` |
+| 生命周期 | `isConnected()` `close()` |
 
-### API 风格
+### McpClientSession 底层 API
 
-`McpClientSession` 提供三套 API 风格，覆盖不同场景：
-
-**1. 异步回调** — 适合事件循环驱动的应用
-```cpp
-session->listTools([](const std::vector<mcp::McpTool>& tools, const mcp::json& err) {
-    // 回调处理
-});
-```
-
-**2. 同步阻塞** — 适合脚本或简单场景
-```cpp
-auto tools = session->listToolsSync(timeout);
-auto result = session->callToolSync("tool_name", args);
-```
-
-**3. Raw 字符串** — 解耦 nlohmann/json，适合跨语言绑定
-```cpp
-session->callToolRaw("tool_name", R"({"key":"value"})", 
-    [](const std::string& result, const std::string& error) { ... });
-```
-
-### 协议操作
+三套 API 风格：**异步回调** / **同步阻塞** / **Raw 字符串**
 
 | 操作 | 异步 | 同步 |
 |------|------|------|
-| 初始化握手 | `initialize()` | `initializeSync()` |
-| 安全关闭 | `shutdown()` | `shutdownSync()` |
-| 列举工具 | `listTools()` | `listToolsSync()` |
-| 调用工具 | `callTool()` | `callToolSync()` |
-| 列举资源 | `listResources()` | `listResourcesSync()` |
-| 读取资源 | `readResource()` | `readResourceSync()` |
-| 列举提示词 | `listPrompts()` | `listPromptsSync()` |
-| 获取提示词 | `getPrompt()` | `getPromptSync()` |
+| 初始化 | `initialize()` | `initializeSync()` |
+| 关闭 | `shutdown()` | `shutdownSync()` |
+| 工具 | `listTools()` `callTool()` | `listToolsSync()` `callToolSync()` |
+| 资源 | `listResources()` `readResource()` `subscribeResource()` `unsubscribeResource()` | `*Sync()` |
+| 提示词 | `listPrompts()` `getPrompt()` | `*Sync()` |
+| Ping | `ping()` | `pingSync()` |
 
 ---
 
-## 自定义传输层
-
-实现 `IMcpTransport` 接口即可接入任意传输协议（WebSocket、gRPC、共享内存等）：
-
-```cpp
-class MyTransport : public mcp::IMcpTransport {
-public:
-    bool send(const std::string& message) override;
-    void setOnMessage(std::function<void(const std::string&)> callback) override;
-    void setOnClose(std::function<void()> callback) override;
-    void setOnError(std::function<void(const std::string&)> callback) override;
-    bool start() override;
-    void close() override;
-};
-```
-
----
-
-## 构建方法
+## 构建
 
 ```bash
-# 构建项目与测试（默认开启 HTTP/SSE 传输，需要编译 libcurl 约 8 分钟）
-cmake -B build
+# C++ 版（含 HTTP/SSE 传输 + OAuth）
+cmake -B build -DMCP_ENABLE_HTTP=ON
+cmake --build build
+
+# Qt 版（含 QtHttpSseTransport + McpQtClient）
+cmake -B build -DMCP_ENABLE_HTTP=ON -DMCP_ENABLE_QT_TRANSPORT=ON
 cmake --build build
 
 # 纯 Stdio 模式（跳过 HTTP 依赖，编译仅需 10 秒）
@@ -146,68 +123,51 @@ cmake --build build
 
 ```
 mcp-cpp-agent/
- ├── mcp_core/                 # SDK 核心库（纯 C++17）
+ ├── mcp_core/                       # SDK 核心（纯 C++17）
  │    ├── include/mcp_core/
- │    │    ├── mcp_core.h               # 一站式头文件
- │    │    ├── McpClientSession.h        # 会话管理
- │    │    ├── IMcpTransport.h           # 传输层接口
- │    │    ├── SubprocessStdioTransport.h# 子进程 Stdio 传输
- │    │    ├── McpTool.h                 # 工具数据结构
- │    │    ├── McpMessage.h              # JSON-RPC 消息结构
- │    │    └── JsonRpcDispatcher.h       # 协议分发器
+ │    │    ├── mcp_core.h                     # 一站式头文件
+ │    │    ├── McpClientSession.h              # 客户端会话
+ │    │    ├── IMcpTransport.h                 # 传输层接口
+ │    │    ├── HttpSseTransport.h              # libcurl SSE 传输
+ │    │    ├── ConsoleStdioTransport.h         # 控制台 Stdio
+ │    │    ├── SubprocessStdioTransport.h      # 子进程 Stdio
+ │    │    ├── McpOAuthClient.h                # OAuth 客户端
+ │    │    └── JsonRpcDispatcher.h             # JSON-RPC 分发器
  │    └── src/
  │
- ├── tests/                    # 测试用例
- └── CMakeLists.txt
+ ├── mcp_qt_transport/               # Qt 传输层（QNAM，零 libcurl）
+ │    ├── include/mcp_qt_transport/
+ │    │    └── QtHttpSseTransport.h
+ │    └── src/
+ │
+ ├── mcp_qt_client/                  # Qt 高层客户端（QObject，信号/槽）
+ │    ├── include/mcp_qt_client/
+ │    │    └── McpQtClient.h
+ │    └── src/
+ │
+ ├── conformance_runner/             # 官方合规测试客户端（C++ 版）
+ ├── conformance_runner_qt/          # 官方合规测试客户端（Qt 版）
+ ├── tests/                          # 单元测试
+ └── tests_qt/                       # Qt 传输层测试
 ```
 
 ---
 
 ## 依赖
 
-- **SDK 核心**：C++17 编译器 + nlohmann/json（自动 FetchContent） + libcurl（自动 FetchContent）
+| 组件 | 依赖 |
+|------|------|
+| mcp_core | C++17, nlohmann/json, libcurl |
+| mcp_qt_transport | Qt6::Core, Qt6::Network |
+| mcp_qt_client | mcp_qt_transport, mcp_core |
 
 ---
 
-## 传输层选择建议
+## 传输层选择
 
-- **本地 MCP 服务子进程**：推荐使用 `mcp::SubprocessStdioTransport`（效率最高，零网络开销）。
-- **Qt 应用程序中的远程 HTTP/HTTPS 服务**：强烈推荐使用 `mcp_qt::QtHttpSseTransport`（基于 Qt6 事件驱动，性能与多线程退出非常健壮）。
-- **非 Qt 环境的远程 HTTP/HTTPS 连接**：可以使用遗留的 `mcp::HttpSseTransport`，该实现为实验性质，提供基本连接能力。
-
-### Qt 传输层使用示例
-
-若需要在 Qt 客户端中连接远程 MCP 服务：
-```cpp
-#include <mcp_core/McpClientSession.h>
-#include <mcp_qt_transport/QtHttpSseTransport.h>
-#include <QCoreApplication>
-#include <QDebug>
-
-int main(int argc, char *argv[]) {
-    QCoreApplication app(argc, argv);
-
-    // 创建 Qt 专属的 HTTP/SSE 传输层并托管在智能指针中
-    auto transport = std::make_shared<mcp_qt::QtHttpSseTransport>("https://server.example.com/mcp");
-    
-    // 由 MCP 核心 Session 接管该传输层
-    auto session = mcp::McpClientSession::connect(transport);
-    
-    // 异步调用 initialize
-    session->initialize("qt-agent", "1.0.0", [](bool success, const mcp::json& serverInfo) {
-        if (success) {
-            qDebug() << "连接到远程 MCP 成功！";
-        }
-    });
-
-    return app.exec();
-}
-```
-
-### 启用 Qt 传输层编译
-
-在配置 CMake 时，传入 `-DMCP_ENABLE_QT_TRANSPORT=ON` 开关即可同时编出 `mcp_qt_transport` 静态库与 Qt 测试程序：
-```bash
-cmake -B build -G "MinGW Makefiles" -DMCP_ENABLE_QT_TRANSPORT=ON
-cmake --build build
-```
+| 场景 | 推荐 |
+|------|------|
+| 本地 MCP 子进程 | `SubprocessStdioTransport` |
+| Qt 应用远程 HTTP/HTTPS | `QtHttpSseTransport` + `McpQtClient` |
+| 非 Qt 环境远程 HTTP/HTTPS | `HttpSseTransport` |
+| 自定义协议（WebSocket 等） | 实现 `IMcpTransport` 接口 |

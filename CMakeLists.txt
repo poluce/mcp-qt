@@ -45,6 +45,26 @@ if(MCP_ENABLE_HTTP)
     FetchContent_MakeAvailable(curl)
 
     # Fetch cpp-httplib (用于 SSE GET，开启 SSL 支持 HTTPS)
+    # 先查找 OpenSSL：Qt MinGW 工具链自带 OpenSSL 开发库
+    if(WIN32 AND NOT OpenSSL_FOUND)
+        # Qt MinGW 的 opt 目录包含 OpenSSL
+        foreach(_qt_mingw_path
+                "E:/Qt6/Tools/mingw1310_64/opt"
+                "C:/Qt/Tools/mingw1310_64/opt"
+                "$ENV{Qt6_DIR}/../../Tools/mingw1310_64/opt")
+            if(EXISTS "${_qt_mingw_path}/include/openssl/ssl.h")
+                set(OPENSSL_ROOT_DIR "${_qt_mingw_path}" CACHE PATH "OpenSSL root directory")
+                message(STATUS "Found OpenSSL at: ${OPENSSL_ROOT_DIR}")
+                break()
+            endif()
+        endforeach()
+    endif()
+    find_package(OpenSSL QUIET)
+    if(OpenSSL_FOUND)
+        message(STATUS "OpenSSL enabled for cpp-httplib SSE HTTPS support")
+    else()
+        message(STATUS "OpenSSL not found — cpp-httplib SSE GET will not support HTTPS")
+    endif()
     FetchContent_Declare(
         cpp-httplib
         URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.1.tar.gz
@@ -67,4 +87,6 @@ option(MCP_ENABLE_QT_TRANSPORT "Build Qt-based HTTP/SSE transport for Qt agents"
 if(MCP_ENABLE_QT_TRANSPORT)
     find_package(Qt6 REQUIRED COMPONENTS Core Network)
     add_subdirectory(mcp_qt_transport)
+    add_subdirectory(mcp_qt_client)
+    add_subdirectory(conformance_runner_qt)
 endif()

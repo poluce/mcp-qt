@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QNetworkReply>
 #include <QObject>
 #include <QPointer>
@@ -48,7 +49,9 @@ private:
     QString m_sessionId;
     QString m_lastEventId;
     int m_retryMs{2000};
+    QElapsedTimer m_reconnectDeadline;
     bool m_stopping{false};
+    bool m_sseConnected{false};
     std::function<std::string()> m_tokenProvider;
     std::function<bool(const std::string&)> m_authRetryHandler;
     class QNetworkAccessManager* m_network{nullptr};

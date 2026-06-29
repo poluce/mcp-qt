@@ -90,11 +90,15 @@ bool QtHttpSseTransport::send(const std::string& message) {
         return false;
     }
     bool accepted = false;
-    QMetaObject::invokeMethod(
-        m_impl->worker,
-        [&]() { accepted = m_impl->worker->postMessage(QString::fromStdString(message)); },
-        Qt::BlockingQueuedConnection
-    );
+    if (QThread::currentThread() == m_impl->thread) {
+        accepted = m_impl->worker->postMessage(QString::fromStdString(message));
+    } else {
+        QMetaObject::invokeMethod(
+            m_impl->worker,
+            [&]() { accepted = m_impl->worker->postMessage(QString::fromStdString(message)); },
+            Qt::BlockingQueuedConnection
+        );
+    }
     return accepted;
 }
 

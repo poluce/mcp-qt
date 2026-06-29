@@ -1,6 +1,9 @@
 #include "mcp_core/HttpSseTransport.h"
 #include <curl/curl.h>
 #include <httplib.h>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <sstream>
 #include <chrono>
 #include <mutex>
@@ -947,6 +950,129 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
             }
         }
         std::cerr << "[SDK Auth Debug] JWT-Bearer Token Exchange Failed" << std::endl;
+        return false;
+    }
+
+    if (scenario == "auth/client-credentials-jwt") {
+        std::string privateKeyPem = ctx.value("private_key_pem", "");
+        std::string signingAlg    = ctx.value("signing_algorithm", "ES256");
+        if (clientId.empty() || privateKeyPem.empty()) {
+            std::cerr << "[SDK Auth Debug] JWT requires client_id and private_key_pem" << std::endl;
+            return false;
+        }
+        try {
+            auto now = std::chrono::system_clock::now();
+            auto exp = now + std::chrono::seconds(300);
+            std::string jwtId = std::to_string(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+
+            // 手动构建 JWT（不依赖 jwt-cpp API，使用原始 OpenSSL EVP 签名）
+            auto epoch = [](const auto& tp) -> int64_t {
+                return std::chrono::duration_cast<std::chrono::seconds>(tp.time_since_epoch()).count();
+            };
+            // 手动 base64url（RFC 7515，不用 jwt-cpp 的编码器）
+            auto b64url = [](const std::string& s) -> std::string {
+                static const char* t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+                std::string o; int v=0, vb=-6;
+                for(unsigned char c:s){v=(v<<8)+c;vb+=8;while(vb>=0){o+=t[(v>>vb)&0x3F];vb-=6;}}
+                if(vb>-6)o+=t[((v<<8)>>(vb+8))&0x3F];
+                return o;
+            };
+
+            std::string headerJson = R"({"alg":"ES256","typ":"JWT"})";
+            nlohmann::json payloadJson;
+            payloadJson["iss"] = clientId;
+            payloadJson["sub"] = clientId;
+            payloadJson["aud"] = issuerUrl;  // RFC 7523: authorization server issuer
+            payloadJson["iat"] = epoch(now);
+            payloadJson["exp"] = epoch(exp);
+            payloadJson["jti"] = jwtId;
+
+            std::string headerB64  = b64url(headerJson);
+            std::string payloadB64 = b64url(payloadJson.dump());
+            std::string toSign = headerB64 + "." + payloadB64;
+
+            // EVP 签名（不依赖 jwt-cpp 的 sign，直接使用 OpenSSL）
+            BIO* bio = BIO_new_mem_buf(privateKeyPem.data(), static_cast<int>(privateKeyPem.size()));
+            if (!bio) { std::cerr << "[SDK Auth Debug] BIO_new failed" << std::endl; return false; }
+            EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+            BIO_free(bio);
+            if (!pkey) { std::cerr << "[SDK Auth Debug] PEM_read failed" << std::endl; return false; }
+
+            EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+            EVP_DigestSignInit(mdctx, nullptr, EVP_sha256(), nullptr, pkey);
+            size_t sigLen = 0;
+            EVP_DigestSign(mdctx, nullptr, &sigLen, (const unsigned char*)toSign.data(), toSign.size());
+            std::vector<unsigned char> derSig(sigLen);
+            EVP_DigestSign(mdctx, derSig.data(), &sigLen, (const unsigned char*)toSign.data(), toSign.size());
+            EVP_MD_CTX_free(mdctx);
+            EVP_PKEY_free(pkey);
+
+            // ECDSA DER → raw (r||s, 各 32 bytes for P-256)
+            auto derToRaw = [](const unsigned char* der, size_t len) -> std::string {
+                if (len < 8 || der[0] != 0x30) return "";
+                size_t rLen = der[3];
+                size_t sOff = 4 + rLen + 2; // skip 02 <sLen>
+                size_t sLen = der[sOff - 1];
+                const unsigned char* rPtr = der + 4;
+                const unsigned char* sPtr = der + sOff;
+                // pad to 32 bytes
+                std::string raw(64, '\0');
+                if (rLen > 32) { rPtr += (rLen - 32); rLen = 32; }
+                if (sLen > 32) { sPtr += (sLen - 32); sLen = 32; }
+                memcpy(&raw[32 - rLen], rPtr, rLen);
+                memcpy(&raw[64 - sLen], sPtr, sLen);
+                return raw;
+            };
+            std::string jwtAssertion = toSign + "." + b64url(derToRaw(derSig.data(), sigLen));
+            std::cerr << "[SDK Auth Debug] JWT: " << jwtAssertion.substr(0, 80) << "..." << std::endl;
+
+            std::cerr << "[SDK Auth Debug] JWT assertion created (alg=" << signingAlg
+                      << "), exchanging for access token..." << std::endl;
+
+            // 使用 JWT assertion 交换 access token
+            CURL* curl = curl_easy_init();
+            if (!curl) return false;
+            std::string response;
+            char* escaped = curl_easy_escape(curl, jwtAssertion.c_str(), static_cast<int>(jwtAssertion.length()));
+            std::string postFields = "grant_type=client_credentials"
+                                     "&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+                                     "&client_assertion=" + std::string(escaped ? escaped : jwtAssertion);
+            if (escaped) curl_free(escaped);
+
+            curl_easy_setopt(curl, CURLOPT_URL, serverMetadata.tokenEndpoint.c_str());
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postFields.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER,
+                curl_slist_append(nullptr, "Content-Type: application/x-www-form-urlencoded"));
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlGetCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+            CURLcode res = curl_easy_perform(curl);
+            long responseCode = 0;
+            if (res == CURLE_OK) {
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+            }
+            curl_easy_cleanup(curl);
+            std::cerr << "[SDK Auth Debug] JWT token exchange: code=" << responseCode
+                      << " response=" << response << std::endl;
+
+            if (res == CURLE_OK) {
+                auto tokenJson = nlohmann::json::parse(response, nullptr, false);
+                if (!tokenJson.is_discarded() && tokenJson.contains("access_token")) {
+                    OAuthToken token;
+                    token.accessToken = tokenJson["access_token"].get<std::string>();
+                    if (tokenJson.contains("refresh_token")) token.refreshToken = tokenJson["refresh_token"].get<std::string>();
+                    token.expiresIn = tokenJson.value("expires_in", 0);
+                    token.obtainedAt = std::chrono::steady_clock::now();
+                    m_oauthClient->setCurrentToken(token);
+                    return true;
+                }
+            }
+            std::cerr << "[SDK Auth Debug] JWT token exchange failed" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[SDK Auth Debug] JWT signing failed: " << e.what() << std::endl;
+        }
         return false;
     }
 

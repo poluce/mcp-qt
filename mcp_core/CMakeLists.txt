@@ -41,5 +41,7 @@ if(MCP_ENABLE_HTTP)
     target_link_libraries(mcp_core PUBLIC
         CURL::libcurl
         httplib::httplib
+        OpenSSL::SSL
+        OpenSSL::Crypto
     )
 endif()
