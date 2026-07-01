@@ -139,7 +139,7 @@ std::string McpOAuthClient::httpGet(const std::string& url) {
     if (!curl) return "";
 
     std::string response;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_NOPROXY, "*"); curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, oauthWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -162,7 +162,7 @@ std::string McpOAuthClient::httpPost(const std::string& url, const std::string& 
     if (!curl) return "";
 
     std::string response;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_NOPROXY, "*"); curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
@@ -331,6 +331,7 @@ McpOAuthClient::AuthRequest McpOAuthClient::buildAuthorizationUrl(
     AuthRequest req;
     req.codeVerifier = generateCodeVerifier();
     req.codeChallenge = computeCodeChallenge(req.codeVerifier);
+    std::cerr << "[SDK OAuth Debug] generateCodeVerifier=" << req.codeVerifier << " challenge=" << req.codeChallenge << std::endl;
     req.state = generateState();
 
     std::string scopeStr;
@@ -415,7 +416,7 @@ void McpOAuthClient::exchangeCode(const std::string& tokenEndpoint, const std::s
             ensureOAuthCurlInit();
             CURL* curl = curl_easy_init();
             if (curl) {
-                curl_easy_setopt(curl, CURLOPT_URL, tokenEndpoint.c_str());
+                curl_easy_setopt(curl, CURLOPT_NOPROXY, "*"); curl_easy_setopt(curl, CURLOPT_URL, tokenEndpoint.c_str());
                 curl_easy_setopt(curl, CURLOPT_POST, 1L);
                 curl_easy_setopt(curl, CURLOPT_POSTFIELDS, bodyStr.c_str());
                 curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(bodyStr.size()));

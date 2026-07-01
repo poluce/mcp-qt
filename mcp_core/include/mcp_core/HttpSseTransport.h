@@ -73,6 +73,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_closed{false};
     std::recursive_mutex m_sendMutex;
+    std::mutex m_authMutex;
 
     std::string m_sseBuffer; // SSE 数据块缓冲区
     std::string m_lastEventId;   // 最后收到的 SSE event id（用于 Last-Event-ID 重连）

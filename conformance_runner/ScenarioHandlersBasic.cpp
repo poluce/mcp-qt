@@ -69,11 +69,12 @@ int runElicitationDefaults(const RunnerConfig& config) {
         }}
     });
 
-    session->setElicitationHandler([](const nlohmann::json&) -> nlohmann::json {
-        return {
+    session->setElicitationHandler([](const nlohmann::json& req, std::function<void(const nlohmann::json&, const nlohmann::json&)> cb) {
+        nlohmann::json result = {
             {"action", "accept"},
             {"content", nlohmann::json::object()}
         };
+        cb(result, nlohmann::json::object());
     });
 
     nlohmann::json serverInfo;

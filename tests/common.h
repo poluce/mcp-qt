@@ -293,3 +293,6 @@ void test_recovery();
 void test_with_filesystem_server();
 void test_with_anysearch_mcp();
 void test_with_inspector_cases();
+
+void test_qt_stateless_http_transport_basic();
+void test_qt_stateless_http_transport_headers();

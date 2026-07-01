@@ -1,5 +1,7 @@
 #include "mcp_qt_client/McpToolsModel.h"
 #include "mcp_qt_client/McpQtClient.h"
+#include <QPointer>
+#include "mcp_qt_client/McpQtClient.h"
 
 namespace mcp_qt {
 
@@ -8,18 +10,14 @@ McpToolsModel::McpToolsModel(QObject* parent)
 
 void McpToolsModel::setClient(McpQtClient* client) {
     if (m_client == client) return;
+    if (m_client) {
+        disconnect(m_client, &McpQtClient::toolsChanged, this, &McpToolsModel::refresh);
+    }
     m_client = client;
 
     if (!m_client) return;
 
-    // 监听 notifications/tools/list-changed 以实现自动刷新
-    // 注意：这仅在 client 已经初始化后才能注册成功
-    m_client->registerNotificationHandler(
-        "notifications/tools/list-changed",
-        this,                          // 以 this 为上下文，保护生命周期
-        [this](const QJsonObject&) {
-            refresh();                 // 通知到达时自动刷新
-        });
+    connect(m_client, &McpQtClient::toolsChanged, this, &McpToolsModel::refresh);
 }
 
 void McpToolsModel::refresh() {
@@ -28,37 +26,78 @@ void McpToolsModel::refresh() {
         return;
     }
 
-    const auto tools = m_client->fetchAllTools();
+    QPointer<McpToolsModel> self = this;
+    m_client->listToolsAsync("", [self](const std::vector<McpQtTool>& tools, const QString& newCursor, const QString& error) {
+        if (!self) return;
+        if (!error.isEmpty()) {
+            emit self->refreshError(error);
+            return;
+        }
 
-    // 数据比对防 Churn 优化
-    bool changed = false;
-    if (m_tools.size() != static_cast<int>(tools.size())) {
-        changed = true;
-    } else {
-        for (size_t i = 0; i < tools.size(); ++i) {
-            const auto& t = tools[i];
-            const auto& existing = m_tools[static_cast<int>(i)];
-            if (existing.name != t.name ||
-                existing.description != t.description ||
-                existing.inputSchema != t.inputSchema) {
-                changed = true;
-                break;
+        // 数据比对防 Churn 优化 (仅针对第一页或全量数据)
+        bool changed = false;
+        if (self->m_tools.size() != static_cast<int>(tools.size()) || !self->m_nextCursor.isEmpty()) {
+            // 如果当前已经加载了多页，或者新的 cursor 状态有变化，直接认为变了
+            changed = true;
+        } else {
+            for (size_t i = 0; i < tools.size(); ++i) {
+                const auto& t = tools[i];
+                const auto& existing = self->m_tools[static_cast<int>(i)];
+                if (existing.name != t.name ||
+                    existing.description != t.description ||
+                    existing.inputSchema != t.inputSchema) {
+                    changed = true;
+                    break;
+                }
             }
         }
-    }
 
-    if (!changed) {
-        return; // 工具列表无变化，直接返回，避免重置 View
-    }
+        if (!changed) {
+            return; // 工具列表无变化，直接返回，避免重置 View
+        }
 
-    beginResetModel();
-    m_tools.clear();
-    for (const auto& t : tools) {
-        m_tools.append({t.name, t.description, t.inputSchema});
-    }
-    endResetModel();
+        self->beginResetModel();
+        self->m_tools.clear();
+        for (const auto& t : tools) {
+            self->m_tools.append({t.name, t.description, t.inputSchema});
+        }
+        self->m_nextCursor = newCursor;
+        self->endResetModel();
 
-    emit countChanged();
+        emit self->countChanged();
+    });
+}
+
+bool McpToolsModel::canFetchMore(const QModelIndex& parent) const {
+    if (parent.isValid()) return false;
+    return !m_nextCursor.isEmpty();
+}
+
+void McpToolsModel::fetchMore(const QModelIndex& parent) {
+    if (parent.isValid() || m_nextCursor.isEmpty() || !m_client) return;
+
+    QPointer<McpToolsModel> self = this;
+    m_client->listToolsAsync(m_nextCursor, [self](const std::vector<McpQtTool>& tools, const QString& newCursor, const QString& error) {
+        if (!self) return;
+        if (!error.isEmpty()) {
+            emit self->refreshError(error);
+            return;
+        }
+
+        if (tools.empty()) {
+            self->m_nextCursor = newCursor;
+            return;
+        }
+
+        self->beginInsertRows(QModelIndex(), self->m_tools.size(), self->m_tools.size() + tools.size() - 1);
+        for (const auto& t : tools) {
+            self->m_tools.append({t.name, t.description, t.inputSchema});
+        }
+        self->m_nextCursor = newCursor;
+        self->endInsertRows();
+
+        emit self->countChanged();
+    });
 }
 
 int McpToolsModel::rowCount(const QModelIndex& parent) const {

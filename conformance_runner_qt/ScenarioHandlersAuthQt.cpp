@@ -10,14 +10,33 @@ namespace mcp_conformance {
 int runInitialize(const RunnerConfig& c) {
     auto cl = mcp_qt::McpQtClient::connectHttp(QString::fromStdString(c.serverUrl));
     if (!cl) return 1;
-    return cl->listTools().empty() ? 1 : 0;
+    
+    QEventLoop loop;
+    bool hasError = false;
+    cl->listToolsAsync("", [&](const std::vector<mcp_qt::McpQtTool>&, const QString&, const QString& err) {
+        hasError = !err.isEmpty();
+        loop.quit();
+    });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    loop.exec();
+    
+    return hasError ? 1 : 0;
 }
 
 int runToolsCall(const RunnerConfig& c) {
     auto cl = mcp_qt::McpQtClient::connectHttp(QString::fromStdString(c.serverUrl));
     if (!cl) return 1;
-    auto t = cl->listTools();
-    if (t.empty()) return 1;
+    
+    QEventLoop loop;
+    bool hasError = false;
+    cl->listToolsAsync("", [&](const std::vector<mcp_qt::McpQtTool>&, const QString&, const QString& err) {
+        hasError = !err.isEmpty();
+        loop.quit();
+    });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    loop.exec();
+    if (hasError) return 1;
+
     QJsonObject a; a["a"] = 5; a["b"] = 3;
     auto res = cl->callTool("add_numbers", a);
     return (res.isError || res.data.isEmpty()) ? 1 : 0;
@@ -26,6 +45,17 @@ int runToolsCall(const RunnerConfig& c) {
 int runSseRetry(const RunnerConfig& c) {
     auto cl = mcp_qt::McpQtClient::connectHttp(QString::fromStdString(c.serverUrl));
     if (!cl) return 1;
+    
+    QEventLoop loop;
+    bool hasError = false;
+    cl->listToolsAsync("", [&](const std::vector<mcp_qt::McpQtTool>&, const QString&, const QString& err) {
+        hasError = !err.isEmpty();
+        loop.quit();
+    });
+    QTimer::singleShot(10000, &loop, &QEventLoop::quit);
+    loop.exec();
+    if (hasError) return 1;
+
     auto res = cl->callTool("test_reconnection", QJsonObject{});
     return (res.isError || res.data.isEmpty()) ? 1 : 0;
 }

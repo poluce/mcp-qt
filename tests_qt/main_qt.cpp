@@ -49,6 +49,8 @@ int main(int argc, char* argv[]) {
     TM_RUN_TEST(test_qt_resource_router);
     TM_RUN_TEST(test_qt_tools_model);
     TM_RUN_TEST(test_qt_transport_recovery);
+    TM_RUN_TEST(test_qt_stateless_http_transport_basic);
+    TM_RUN_TEST(test_qt_stateless_http_transport_headers);
 
     TmTestRunner::instance().printSummary();
     return TmTestRunner::instance().hasFailed() ? 1 : 0;

@@ -100,6 +100,7 @@ void test_qt_tools_model() {
 
         // 触发填充
         model->refresh();
+        waitEvents(50);
 
         TM_ASSERT_EQ(model->rowCount(), 2, "Model should now contain 2 rows");
         TM_ASSERT_EQ(resetSpy.count(), 1, "Model should be reset exactly once for new data");
@@ -113,6 +114,7 @@ void test_qt_tools_model() {
         // --- 防 Churn 验证 ---
         // 我们再次刷新，让服务端返回“一模一样”的数据
         model->refresh();
+        waitEvents(50);
 
         TM_ASSERT_EQ(model->rowCount(), 2, "Row count remains 2");
         TM_ASSERT_EQ(resetSpy.count(), 1, "modelReset count MUST NOT increase because data is identical (Anti-Churn logic)");
@@ -139,10 +141,10 @@ void test_qt_tools_model() {
             }
         };
 
-        // 模拟服务端广播 notifications/tools/list-changed
+        // 模拟服务端广播 notifications/tools/list_changed
         nlohmann::json notifyJson = {
             {"jsonrpc", "2.0"},
-            {"method", "notifications/tools/list-changed"},
+            {"method", "notifications/tools/list_changed"},
             {"params", {}}
         };
         {

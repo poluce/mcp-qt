@@ -5,6 +5,12 @@ add_library(mcp_qt_client STATIC
     src/McpQtClient.cpp
     include/mcp_qt_client/McpToolsModel.h
     src/McpToolsModel.cpp
+    include/mcp_qt_client/McpPromptsModel.h
+    src/McpPromptsModel.cpp
+    include/mcp_qt_client/McpResourcesModel.h
+    src/McpResourcesModel.cpp
+    include/mcp_qt_client/McpResourceTemplatesModel.h
+    src/McpResourceTemplatesModel.cpp
 )
 
 target_include_directories(mcp_qt_client PUBLIC

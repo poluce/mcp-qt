@@ -61,6 +61,10 @@ public:
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
+    
+    bool canFetchMore(const QModelIndex& parent = QModelIndex()) const override;
+    void fetchMore(const QModelIndex& parent = QModelIndex()) override;
+
 
 signals:
     void countChanged();
@@ -75,6 +79,7 @@ private:
 
     McpQtClient* m_client{nullptr};
     QList<ToolEntry> m_tools;
+    QString m_nextCursor;
 };
 
 } // namespace mcp_qt

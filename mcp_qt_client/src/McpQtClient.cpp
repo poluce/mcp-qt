@@ -1,4 +1,5 @@
 #include "mcp_qt_client/McpQtClient.h"
+#include "mcp_qt_client/McpResourceTemplatesModel.h"
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
@@ -135,6 +136,7 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
 // Builder Implementation
 // ============================================================================
 McpQtClientBuilder& McpQtClientBuilder::setTransportHttp(const QString& url) { m_transportType = 1; m_url_or_cmd = url; return *this; }
+McpQtClientBuilder& McpQtClientBuilder::setTransportStatelessHttp(const QString& url) { m_transportType = 3; m_url_or_cmd = url; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setTransportStdio(const QString& command, const QStringList& args) { m_transportType = 2; m_url_or_cmd = command; m_args = args; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setHttpHeaders(const QMap<QString, QString>& headers) { m_httpHeaders = headers; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setHttpProxy(const QNetworkProxy& proxy) { m_proxy = proxy; return *this; }
@@ -166,6 +168,26 @@ std::shared_ptr<McpQtClient> McpQtClientBuilder::buildAndConnect(QString* errorS
             cfg.proxy = *m_proxy;
         }
         t->setRequestConfig(cfg);
+
+        if (!c->connectToTransport(t, m_clientName, m_clientVersion, m_timeoutMs, errorString)) {
+            return nullptr;
+        }
+        return c;
+    }
+    if (m_transportType == 3) {
+        c->m_httpHeaders = m_httpHeaders;
+        c->m_proxy = m_proxy;
+
+        auto t = std::make_shared<mcp_qt::QtStatelessHttpTransport>(m_url_or_cmd);
+        
+        QMap<QByteArray, QByteArray> headers;
+        for (auto it = m_httpHeaders.constBegin(); it != m_httpHeaders.constEnd(); ++it) {
+            headers.insert(it.key().toUtf8(), it.value().toUtf8());
+        }
+        t->setCustomHeaders(headers);
+        if (m_proxy) {
+            t->setProxy(*m_proxy);
+        }
 
         if (!c->connectToTransport(t, m_clientName, m_clientVersion, m_timeoutMs, errorString)) {
             return nullptr;
@@ -245,7 +267,16 @@ bool McpQtClient::connectToTransport(std::shared_ptr<mcp::IMcpTransport> t,const
         }, Qt::QueuedConnection);
     });
     m_session->setNotificationCallback([this](const std::string& method, const nlohmann::json& params) {
-        emit notificationReceived(QString::fromStdString(method), _qj(params));
+        QString methodStr = QString::fromStdString(method);
+        emit notificationReceived(methodStr, _qj(params));
+        
+        if (methodStr == "notifications/tools/list_changed") {
+            QMetaObject::invokeMethod(this, &McpQtClient::toolsChanged, Qt::QueuedConnection);
+        } else if (methodStr == "notifications/resources/list_changed") {
+            QMetaObject::invokeMethod(this, &McpQtClient::resourcesChanged, Qt::QueuedConnection);
+        } else if (methodStr == "notifications/prompts/list_changed") {
+            QMetaObject::invokeMethod(this, &McpQtClient::promptsChanged, Qt::QueuedConnection);
+        }
     });
 
     // 监听 session 的 onClose 以响应连接断开，不覆盖底层的 transport onClose
@@ -267,6 +298,17 @@ bool McpQtClient::connectToTransport(std::shared_ptr<mcp::IMcpTransport> t,const
                 m_resourceRouter.dispatch(uri, qp);
             }
         });
+
+    // Apply saved handlers if any (this will also register their capabilities in m_session)
+    if (m_savedSamplingHandler) {
+        setSamplingHandler(m_savedSamplingContext.data(), m_savedSamplingHandler);
+    }
+    if (m_savedElicitationHandler) {
+        setElicitationHandler(m_savedElicitationContext.data(), m_savedElicitationHandler);
+    }
+    if (m_savedRootsProvider) {
+        setRootsProvider(m_savedRootsContext.data(), m_savedRootsProvider);
+    }
 
     if(!m_session->start()){ if(err)*err="Failed to start transport"; emit errorOccurred(*err); return false; }
     return doInitialize(name,ver,to,err);
@@ -304,6 +346,10 @@ QJsonObject McpQtClient::serverCapabilities()const{return m_session?_qj(m_sessio
 QString McpQtClient::negotiatedProtocolVersion()const{return m_session?QString::fromStdString(m_session->getNegotiatedProtocolVersion()):QString{};}
 QString McpQtClient::instructions()const{return m_session?QString::fromStdString(m_session->getInstructions()):QString{};}
 
+bool McpQtClient::hasToolsCapability() const { return serverCapabilities().contains("tools"); }
+bool McpQtClient::hasPromptsCapability() const { return serverCapabilities().contains("prompts"); }
+bool McpQtClient::hasResourcesCapability() const { return serverCapabilities().contains("resources"); }
+
 // ========== Tools ==========
 static std::vector<McpQtTool> _cvt(const std::vector<mcp::McpTool>& src) { std::vector<McpQtTool> r; for(const auto& t:src){ r.push_back({QString::fromStdString(t.name), QString::fromStdString(t.description), _qj(t.inputSchema)}); } return r; }
 std::vector<McpQtTool> McpQtClient::listTools(int to){
@@ -322,6 +368,26 @@ std::vector<McpQtTool> McpQtClient::fetchAllTools(int to) {
     do { QString nc; auto r=listTools(c,&nc,to); all.insert(all.end(),r.begin(),r.end()); c=nc; } while(!c.isEmpty());
     return all;
 }
+
+void McpQtClient::listToolsAsync(const QString& cursor, std::function<void(const std::vector<McpQtTool>&, const QString&, const QString&)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback({}, "", "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->listTools(cursor.toStdString(), [this, callback](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const nlohmann::json& error) {
+        if (!callback) return;
+        auto res = _cvt(tools);
+        // Note: m_toolSchemaCache must be accessed from the thread it was created on, usually main thread
+        // We will do it inside the invokeMethod
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QString nc = QString::fromStdString(nextCursor);
+        QMetaObject::invokeMethod(this, [this, res, nc, errStr, callback]() {
+            for(const auto& t : res) m_toolSchemaCache[t.name] = t.inputSchema;
+            callback(res, nc, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
+
 
 std::unique_ptr<McpToolsModel> McpQtClient::createToolsModel(QObject* parent) {
     auto model = std::make_unique<McpToolsModel>(parent);
@@ -538,7 +604,39 @@ QJsonObject McpQtClient::fetchAllResources(int to) {
     do { QString nc; auto r=listResources(c,&nc,to); QJsonArray ta=r.value("resources").toArray(); for(const auto& x:ta) arr.append(x); c=nc; } while(!c.isEmpty());
     all["resources"] = arr; return all;
 }
+
+void McpQtClient::listResourcesAsync(const QString& cursor, std::function<void(const QJsonObject&, const QString&, const QString&)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(QJsonObject{}, "", "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->listResources(cursor.toStdString(), [this, callback](const nlohmann::json& result, const std::string& nextCursor, const nlohmann::json& error) {
+        if (!callback) return;
+        QJsonObject res = _qj(result);
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QString nc = QString::fromStdString(nextCursor);
+        QMetaObject::invokeMethod(this, [res, nc, errStr, callback]() {
+            callback(res, nc, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
+
 QJsonObject McpQtClient::readResource(const QString& u,int to){nlohmann::json e;return m_session?_qj(m_session->readResourceSync(u.toStdString(),&e,std::chrono::milliseconds(to))):QJsonObject{};}
+
+void McpQtClient::readResourceAsync(const QString& uri, std::function<void(const QJsonObject& result, const QString& error)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(QJsonObject{}, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->readResource(uri.toStdString(), [this, callback](const nlohmann::json& result, const nlohmann::json& error) {
+        if (!callback) return;
+        QJsonObject res = _qj(result);
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QMetaObject::invokeMethod(this, [res, errStr, callback]() {
+            callback(res, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
 bool McpQtClient::subscribeResource(const QString& u,int to){
     if(!m_session) return false;
     nlohmann::json e;
@@ -548,37 +646,95 @@ bool McpQtClient::subscribeResource(const QString& u,int to){
     }
     return ok;
 }
+
+void McpQtClient::subscribeResourceAsync(const QString& uri, std::function<void(bool success, const QString& error)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(false, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->subscribeResource(uri.toStdString(), [this, uri, callback](bool success, const nlohmann::json& error) {
+        if (success) {
+            QMetaObject::invokeMethod(this, [this, uri]() { m_resourceRouter.subscribe(uri, nullptr); }, Qt::QueuedConnection);
+        }
+        if (!callback) return;
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QMetaObject::invokeMethod(this, [success, errStr, callback]() { callback(success, errStr); }, Qt::QueuedConnection);
+    });
+}
+
 bool McpQtClient::unsubscribeResource(const QString& u,int to){
     m_resourceRouter.unsubscribeAll(u);
     nlohmann::json e;
     return m_session?m_session->unsubscribeResourceSync(u.toStdString(),&e,std::chrono::milliseconds(to)):false;
 }
 
+void McpQtClient::unsubscribeResourceAsync(const QString& uri, std::function<void(bool success, const QString& error)> callback) {
+    m_resourceRouter.unsubscribeAll(uri);
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(false, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->unsubscribeResource(uri.toStdString(), [this, callback](bool success, const nlohmann::json& error) {
+        if (!callback) return;
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QMetaObject::invokeMethod(this, [success, errStr, callback]() { callback(success, errStr); }, Qt::QueuedConnection);
+    });
+}
+
 int McpQtClient::subscribeResource(const QString& uri,
                                     std::function<void(const QString&, const QJsonObject&)> callback,
                                     int to) {
     if (!m_session) return -1;
-
-    // 发送 resources/subscribe
     nlohmann::json e;
     bool ok = m_session->subscribeResourceSync(uri.toStdString(), &e, std::chrono::milliseconds(to));
     if (!ok) return -1;
-
-    // 注册路由回调并返回 token
     return m_resourceRouter.subscribe(uri, std::move(callback));
 }
 
-bool McpQtClient::unsubscribeResourceByToken(const QString& uri, int routerToken, int to) {
-    // 先从路由器移除回调
-    m_resourceRouter.unsubscribe(uri, routerToken);
+void McpQtClient::subscribeResourceAsync(const QString& uri,
+                                         std::function<void(const QString&, const QJsonObject&)> onUpdate,
+                                         std::function<void(int routerToken, const QString& error)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(-1, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->subscribeResource(uri.toStdString(), [this, uri, onUpdate, callback](bool success, const nlohmann::json& error) {
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        if (!success) {
+            if (callback) QMetaObject::invokeMethod(this, [callback, errStr]() { callback(-1, errStr); }, Qt::QueuedConnection);
+            return;
+        }
+        QMetaObject::invokeMethod(this, [this, uri, onUpdate, callback, errStr]() {
+            int token = m_resourceRouter.subscribe(uri, onUpdate);
+            if (callback) callback(token, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
 
-    // 若该 URI 已无订阅者，则发送 resources/unsubscribe
+bool McpQtClient::unsubscribeResourceByToken(const QString& uri, int routerToken, int to) {
+    m_resourceRouter.unsubscribe(uri, routerToken);
     if (!m_resourceRouter.hasSubscribers(uri)) {
-        // 直接调用 session，避免与 unsubscribeResource(uri, int) 的重载歧义
         nlohmann::json e;
         return m_session ? m_session->unsubscribeResourceSync(uri.toStdString(), &e, std::chrono::milliseconds(to)) : false;
     }
-    return true; // 仍有其他订阅者，不发送 unsubscribe
+    return true;
+}
+
+void McpQtClient::unsubscribeResourceByTokenAsync(const QString& uri, int routerToken, std::function<void(bool success, const QString& error)> callback) {
+    m_resourceRouter.unsubscribe(uri, routerToken);
+    if (!m_resourceRouter.hasSubscribers(uri)) {
+        if (!m_session) {
+            if (callback) QMetaObject::invokeMethod(this, [=]() { callback(false, "No session"); }, Qt::QueuedConnection);
+            return;
+        }
+        m_session->unsubscribeResource(uri.toStdString(), [this, callback](bool success, const nlohmann::json& error) {
+            if (!callback) return;
+            QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+            QMetaObject::invokeMethod(this, [success, errStr, callback]() { callback(success, errStr); }, Qt::QueuedConnection);
+        });
+    } else {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(true, ""); }, Qt::QueuedConnection);
+    }
 }
 
 
@@ -592,6 +748,28 @@ std::vector<mcp::McpResourceTemplate> McpQtClient::fetchAllResourceTemplates(int
     return all;
 }
 
+void McpQtClient::listResourceTemplatesAsync(const QString& cursor, std::function<void(const std::vector<mcp::McpResourceTemplate>&, const QString&, const QString&)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback({}, "", "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->listResourceTemplates(cursor.toStdString(), [this, callback](const std::vector<mcp::McpResourceTemplate>& templates, const std::string& nextCursor, const nlohmann::json& error) {
+        if (!callback) return;
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QString nc = QString::fromStdString(nextCursor);
+        QMetaObject::invokeMethod(this, [templates, nc, errStr, callback]() {
+            callback(templates, nc, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
+
+std::unique_ptr<McpResourceTemplatesModel> McpQtClient::createResourceTemplatesModel(QObject* parent) {
+    auto model = std::make_unique<McpResourceTemplatesModel>(parent);
+    model->setClient(this);
+    m_templatesModels.append(model.get());
+    return model;
+}
+
 // ========== Prompts ==========
 QJsonObject McpQtClient::listPrompts(int to){nlohmann::json e;return m_session?_qj(m_session->listPromptsSync(std::chrono::milliseconds(to),&e)):QJsonObject{};}
 QJsonObject McpQtClient::listPrompts(const QString& c,QString* n,int to){nlohmann::json e;std::string ns;auto r=m_session?_qj(m_session->listPromptsSync(c.toStdString(),&ns,std::chrono::milliseconds(to),&e)):QJsonObject{};if(n)*n=QString::fromStdString(ns);return r;}
@@ -600,11 +778,69 @@ QJsonObject McpQtClient::fetchAllPrompts(int to) {
     do { QString nc; auto r=listPrompts(c,&nc,to); QJsonArray ta=r.value("prompts").toArray(); for(const auto& x:ta) arr.append(x); c=nc; } while(!c.isEmpty());
     all["prompts"] = arr; return all;
 }
+
+void McpQtClient::listPromptsAsync(const QString& cursor, std::function<void(const QJsonObject&, const QString&, const QString&)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(QJsonObject{}, "", "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->listPrompts(cursor.toStdString(), [this, callback](const nlohmann::json& result, const std::string& nextCursor, const nlohmann::json& error) {
+        if (!callback) return;
+        QJsonObject res = _qj(result);
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QString nc = QString::fromStdString(nextCursor);
+        QMetaObject::invokeMethod(this, [res, nc, errStr, callback]() {
+            callback(res, nc, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
+
 QJsonObject McpQtClient::getPrompt(const QString& nm,const QJsonObject& a,int to){nlohmann::json e;return m_session?_qj(m_session->getPromptSync(nm.toStdString(),_nl(a),&e,std::chrono::milliseconds(to))):QJsonObject{};}
+
+void McpQtClient::getPromptAsync(const QString& name, const QJsonObject& arguments, std::function<void(const QJsonObject& result, const QString& error)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(QJsonObject{}, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->getPrompt(name.toStdString(), _nl(arguments), [this, callback](const nlohmann::json& result, const nlohmann::json& error) {
+        if (!callback) return;
+        QJsonObject res = _qj(result);
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QMetaObject::invokeMethod(this, [res, errStr, callback]() {
+            callback(res, errStr);
+        }, Qt::QueuedConnection);
+    });
+}
 
 // ========== Etc ==========
 bool McpQtClient::ping(int to){return m_session?m_session->pingSync(std::chrono::milliseconds(to)):false;}
+
+void McpQtClient::pingAsync(std::function<void(bool success, const QString& error)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(false, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->ping([this, callback](bool success, const nlohmann::json& error) {
+        if (!callback) return;
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QMetaObject::invokeMethod(this, [success, errStr, callback]() { callback(success, errStr); }, Qt::QueuedConnection);
+    });
+}
+
 QJsonObject McpQtClient::complete(const QJsonObject& rf,const QJsonObject& ag,int to){nlohmann::json e;return m_session?_qj(m_session->completeSync(_nl(rf),_nl(ag),&e,std::chrono::milliseconds(to))):QJsonObject{};}
+
+void McpQtClient::completeAsync(const QJsonObject& ref, const QJsonObject& argument, std::function<void(const QJsonObject& completion, const QString& error)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(QJsonObject{}, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->complete(_nl(ref), _nl(argument), [this, callback](const nlohmann::json& completion, const nlohmann::json& error) {
+        if (!callback) return;
+        QJsonObject comp = _qj(completion);
+        QString errStr = error.empty() ? QString() : QString::fromStdString(error.dump());
+        QMetaObject::invokeMethod(this, [comp, errStr, callback]() { callback(comp, errStr); }, Qt::QueuedConnection);
+    });
+}
 bool McpQtClient::setLoggingLevel(const QString& lv,int to){if(!m_session)return false;nlohmann::json e;m_session->callToolSync("logging/setLevel",_nl(QJsonObject{{"level",lv}}),&e,std::chrono::milliseconds(to));return e.empty();}
 
 // ========== 双向能力 ==========
@@ -612,9 +848,15 @@ void McpQtClient::setElicitationHandler(ElicitationHandler h){
     setElicitationHandler(this, h);
 }
 void McpQtClient::setElicitationHandler(QObject* ctx, ElicitationHandler h){
+    m_savedElicitationHandler = h;
+    m_savedElicitationContext = QPointer<QObject>(ctx);
+    m_hasSavedElicitationContext = (ctx != nullptr);
     if(!m_session) return;
-    bool hasCtx = (ctx != nullptr);
-    QPointer<QObject> pCtx(ctx);
+    
+    registerCapability("experimental", QJsonObject{{"elicitation", QJsonObject()}});
+    
+    bool hasCtx = m_hasSavedElicitationContext;
+    QPointer<QObject> pCtx = m_savedElicitationContext;
     m_session->setElicitationHandler([h, pCtx, hasCtx](const nlohmann::json& p, std::function<void(const nlohmann::json&, const nlohmann::json&)> cb){
         QJsonObject qp = _qj(p);
         auto localCb = [cb](const QJsonObject& res, const QJsonObject& err) {
@@ -637,9 +879,15 @@ void McpQtClient::setSamplingHandler(SamplingHandler h){
     setSamplingHandler(this, h);
 }
 void McpQtClient::setSamplingHandler(QObject* ctx, SamplingHandler h){
+    m_savedSamplingHandler = h;
+    m_savedSamplingContext = QPointer<QObject>(ctx);
+    m_hasSavedSamplingContext = (ctx != nullptr);
     if(!m_session) return;
-    bool hasCtx = (ctx != nullptr);
-    QPointer<QObject> pCtx(ctx);
+    
+    registerCapability("sampling", QJsonObject());
+    
+    bool hasCtx = m_hasSavedSamplingContext;
+    QPointer<QObject> pCtx = m_savedSamplingContext;
     m_session->setSamplingHandler([h, pCtx, hasCtx](const nlohmann::json& p, std::function<void(const nlohmann::json&, const nlohmann::json&)> cb){
         QJsonObject qp = _qj(p);
         auto localCb = [cb](const QJsonObject& res, const QJsonObject& err) {
@@ -662,9 +910,15 @@ void McpQtClient::setRootsProvider(RootsProvider p){
     setRootsProvider(this, p);
 }
 void McpQtClient::setRootsProvider(QObject* ctx, RootsProvider p){
+    m_savedRootsProvider = p;
+    m_savedRootsContext = QPointer<QObject>(ctx);
+    m_hasSavedRootsContext = (ctx != nullptr);
     if(!m_session) return;
-    bool hasCtx = (ctx != nullptr);
-    QPointer<QObject> pCtx(ctx);
+    
+    registerCapability("roots", QJsonObject{{"listChanged", true}});
+    
+    bool hasCtx = m_hasSavedRootsContext;
+    QPointer<QObject> pCtx = m_savedRootsContext;
     m_session->setRootsProvider([p, pCtx, hasCtx](std::function<void(const nlohmann::json&, const nlohmann::json&)> cb){
         auto localCb = [cb](const QJsonArray& res, const QJsonObject& err) {
             cb(_nl(QJsonObject{{"roots", res}})["roots"], _nl(err));
@@ -923,16 +1177,17 @@ void McpQtClient::restoreNotificationHandlers() {
 void McpQtClient::restoreResourceSubscriptions() {
     auto uris = m_resourceRouter.subscribedUris();
     for (const auto& uri : uris) {
-        nlohmann::json e;
-        m_session->subscribeResourceSync(uri.toStdString(), &e, std::chrono::milliseconds(m_timeoutMs));
+        if (!m_session) continue;
+        m_session->subscribeResource(uri.toStdString(), [](bool, const nlohmann::json&){});
     }
 }
 
 void McpQtClient::refreshToolsAfterRecovery() {
     if (!m_session) return;
 
-    // 刷新工具缓存，确保恢复后本地能力集与服务端最新状态一致。
-    (void)fetchAllTools(m_timeoutMs);
+    // 异步拉取首页以更新工具缓存，避免阻塞主线程死锁
+    listToolsAsync("", nullptr);
+
 
     for (auto it = m_toolsModels.begin(); it != m_toolsModels.end();) {
         if (!*it) {
