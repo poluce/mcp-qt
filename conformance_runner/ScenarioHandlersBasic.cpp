@@ -1,5 +1,7 @@
 #include "RunnerConfig.h"
 
+#include <iostream>
+#include <fstream>
 #include <mcp_core/HttpSseTransport.h>
 #include <mcp_core/McpClientSession.h>
 
@@ -70,6 +72,9 @@ int runElicitationDefaults(const RunnerConfig& config) {
     });
 
     session->setElicitationHandler([](const nlohmann::json& req, std::function<void(const nlohmann::json&, const nlohmann::json&)> cb) {
+        std::ofstream ofs("elicitation_req.json");
+        ofs << req.dump(4);
+        ofs.close();
         nlohmann::json result = {
             {"action", "accept"},
             {"content", nlohmann::json::object()}

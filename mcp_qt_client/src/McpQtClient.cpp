@@ -310,6 +310,12 @@ bool McpQtClient::connectToTransport(std::shared_ptr<mcp::IMcpTransport> t,const
         setRootsProvider(m_savedRootsContext.data(), m_savedRootsProvider);
     }
 
+    // Apply any capabilities that were registered before the session existed
+    for (const auto& pc : m_pendingCapabilities) {
+        m_session->registerCapabilities(_nl(QJsonObject{{pc.name, pc.config}}));
+    }
+    m_pendingCapabilities.clear();
+
     if(!m_session->start()){ if(err)*err="Failed to start transport"; emit errorOccurred(*err); return false; }
     return doInitialize(name,ver,to,err);
 }
@@ -1026,7 +1032,13 @@ int64_t McpQtClient::sendRequest(const QString& m,const QJsonObject& p, QObject*
 void McpQtClient::cancelRequest(int64_t id){if(m_session)m_session->cancelRequest(id);}
 
 // ========== 能力 ==========
-void McpQtClient::registerCapability(const QString& n,const QJsonObject& c){if(m_session)m_session->registerCapabilities(_nl(QJsonObject{{n,c}}));}
+void McpQtClient::registerCapability(const QString& n,const QJsonObject& c){
+    if(m_session){
+        m_session->registerCapabilities(_nl(QJsonObject{{n,c}}));
+    }else{
+        m_pendingCapabilities.push_back({n, c});
+    }
+}
 
 // ========== 生命周期 ==========
 bool McpQtClient::isConnected()const{return m_session&&m_session->state()==mcp::SessionState::Initialized;}

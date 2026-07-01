@@ -344,6 +344,12 @@ private:
     TrafficLogger m_trafficLogger;
     McpResourceSubscriptionRouter m_resourceRouter;
 
+    struct PendingCapability {
+        QString name;
+        QJsonObject config;
+    };
+    std::vector<PendingCapability> m_pendingCapabilities;
+
     // 重连与恢复上下文
     int m_transportType{0}; // 0=none/test, 1=http, 2=stdio
     QString m_url_or_cmd;

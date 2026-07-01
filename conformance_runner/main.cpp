@@ -13,7 +13,7 @@ static std::string getEnv(const std::string& key, const std::string& defaultVal 
 
 int main(int argc, char* argv[]) {
     std::setvbuf(stdout, NULL, _IONBF, 0);
-    std::setvbuf(stderr, NULL, _IONBF, 0);
+    freopen("client_err.log", "w", stderr); std::setvbuf(stderr, NULL, _IONBF, 0);
 
     const std::string scenario = getEnv("MCP_CONFORMANCE_SCENARIO", "");
     const std::string context  = getEnv("MCP_CONFORMANCE_CONTEXT", "{}");

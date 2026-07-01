@@ -16,6 +16,14 @@ namespace mcp {
 
 class McpOAuthClient;
 
+} // namespace mcp
+
+namespace httplib {
+class Client;
+}
+
+namespace mcp {
+
 /**
  * @brief Legacy pure C++ HTTP/SSE transport for MCP (experimental on Windows HTTPS/SSE).
  *
@@ -78,6 +86,11 @@ private:
     std::string m_sseBuffer; // SSE 数据块缓冲区
     std::string m_lastEventId;   // 最后收到的 SSE event id（用于 Last-Event-ID 重连）
     int m_sseRetryMs{2000};      // 服务端指定的 SSE 重连延迟（毫秒），默认 2 秒
+    int m_totalAuthRetries{0};   // 认证重试总次数（scope-retry-limit 防护，不因成功 OAuth 重置）
+    static constexpr int kMaxAuthRetries = 3; // 最大认证重试次数（scope-retry-limit 期望 ≤3）
+
+    std::unique_ptr<httplib::Client> m_httpClient;
+    std::mutex m_clientMutex;
 
     bool handleDefaultAuthRetry(const std::string& wwwAuthHeader);
 

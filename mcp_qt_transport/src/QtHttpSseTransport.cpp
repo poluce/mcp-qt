@@ -4,6 +4,7 @@
 
 #include <QMetaObject>
 #include <QThread>
+#include <cstdio>
 
 namespace mcp_qt {
 
@@ -36,6 +37,7 @@ bool QtHttpSseTransport::start() {
     if (m_impl->running) {
         return false;
     }
+    // Debug: not using printf because conformance framework may not capture worker thread output
     m_impl->thread = new QThread();
     m_impl->worker = new QtHttpSseWorker(QString::fromStdString(m_impl->url));
     m_impl->worker->moveToThread(m_impl->thread);

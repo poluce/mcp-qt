@@ -1,6 +1,8 @@
 #include "QtHttpSseWorker.h"
 
 #include <chrono>
+#include <cstdio>
+#include <iostream>
 #include <thread>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
@@ -48,13 +50,17 @@ QtHttpSseWorker::QtHttpSseWorker(QString baseUrl, QObject* parent)
     m_reconnectTimer->setSingleShot(true);
     m_reconnectTimer->setTimerType(Qt::PreciseTimer);
 
-    connect(m_reconnectTimer, &QTimer::timeout, this, &QtHttpSseWorker::openSse);
+    connect(m_reconnectTimer, &QTimer::timeout, this, [this]() {
+        printf( "[SDK QtSSE] Reconnect timer fired after %lldms (expected %dms)\n", m_reconnectDeadline.elapsed(), m_retryMs);
+        openSse();
+    });
     m_parser.setRetryCallback([this](int retryMs) {
         m_retryMs = retryMs;
         // 如果 timer 已在跑，用新值重启（retry 字段可能在 timer 启动后才到达）
         if (m_reconnectTimer->isActive()) {
             m_reconnectTimer->stop();
             m_reconnectTimer->start(m_retryMs);
+            m_reconnectDeadline.start(); // 同时重置 deadline
         }
     });
     m_parser.setEventCallback([this](const QtSseEvent& event) { handleSseEvent(event); });
@@ -79,11 +85,26 @@ void QtHttpSseWorker::startStream() {
         }
     }
     openSse();
+
+    // 健康检查定时器：检测 SSE 连接断开（Qt QNetworkReply 在 SSE 关闭时不触发 finished）
+    if (!m_healthCheckTimer) {
+        m_healthCheckTimer = new QTimer(this);
+        m_healthCheckTimer->setTimerType(Qt::CoarseTimer);
+        connect(m_healthCheckTimer, &QTimer::timeout, this, [this]() {
+            if (m_stopping || !m_sseReply || !m_sseConnected) return;
+            // QNetworkReply::isRunning 在连接关闭后返回 false
+            if (m_sseReply->isFinished()) {
+                handleSseFinished();
+            }
+        });
+    }
+    m_healthCheckTimer->start(100);
 }
 
 void QtHttpSseWorker::stopStream() {
     m_stopping = true;
     m_reconnectTimer->stop();
+    if (m_healthCheckTimer) m_healthCheckTimer->stop();
     if (m_sseReply) {
         disconnect(m_sseReply, nullptr, this, nullptr);
         m_sseReply->abort();
@@ -123,6 +144,11 @@ void QtHttpSseWorker::openSse() {
     if (m_stopping) {
         return;
     }
+    if (m_sseReply) {
+        disconnect(m_sseReply, nullptr, this, nullptr);
+        m_sseReply->deleteLater();
+        m_sseReply = nullptr;
+    }
     QNetworkRequest request;
     request.setUrl(QUrl(m_baseUrl));
     applyCommonHeaders(request);
@@ -139,6 +165,15 @@ void QtHttpSseWorker::openSse() {
     connect(m_sseReply, &QIODevice::readyRead, this, &QtHttpSseWorker::handleSseReadyRead);
     connect(m_sseReply, &QNetworkReply::finished, this, &QtHttpSseWorker::handleSseFinished);
     connect(m_sseReply, &QNetworkReply::errorOccurred, this, &QtHttpSseWorker::handleSseError);
+    // readChannelFinished 作为 finished 的补充检测（某些 Qt 版本在连接关闭时不触发 finished）
+    connect(m_sseReply, &QNetworkReply::readChannelFinished, this, [this]() {
+        if (m_sseReply && !m_stopping && !m_sseConnected) {
+            return; // 连接还没建立成功就关闭了，不触发重连
+        }
+        if (!m_sseReply || m_stopping) return;
+        std::cerr << "[SDK QtSSE] readChannelFinished: SSE stream closed, triggering reconnect" << std::endl;
+        handleSseFinished();
+    });
 }
 
 void QtHttpSseWorker::handleSseReadyRead() {
@@ -150,6 +185,9 @@ void QtHttpSseWorker::handleSseReadyRead() {
         m_sseConnected = true;
     }
     const QByteArray chunk = m_sseReply->readAll();
+    if (!chunk.isEmpty()) {
+        m_lastDataTime.start();
+    }
     m_parser.pushChunk(chunk.toStdString());
 }
 
@@ -157,7 +195,8 @@ void QtHttpSseWorker::handleSseFinished() {
     if (!m_sseReply) {
         return;
     }
-    const auto sessionHeader = m_sseReply->rawHeader("MCP-Session-Id");
+    // DEBUG: track if handleSseFinished fires
+const auto sessionHeader = m_sseReply->rawHeader("MCP-Session-Id");
     if (!sessionHeader.isEmpty()) {
         m_sessionId = QString::fromUtf8(sessionHeader);
     }
@@ -172,8 +211,19 @@ void QtHttpSseWorker::handleSseFinished() {
         return;
     }
 
-    // 401/403：有认证处理器的重试
+    // 成功的 SSE 会话结束后重置认证计数器
+    if (statusCode == 200) {
+        m_authRetryCount = 0;
+    }
+
+    // 401/403：有认证处理器的重试（限制上限防止无限循环）
     if (statusCode == 401 || statusCode == 403) {
+        m_authRetryCount++;
+        if (m_authRetryCount > kMaxAuthRetries) {
+            emit transportError(QString("Max auth retries (%1) exceeded").arg(kMaxAuthRetries));
+            stopStream();
+            return;
+        }
         if (m_authRetryHandler && m_authRetryHandler(wwwAuthHeader.toStdString())) {
             openSse();
             return;
@@ -220,7 +270,11 @@ void QtHttpSseWorker::handleSseEvent(const QtSseEvent& event) {
 
 void QtHttpSseWorker::scheduleReconnect() {
     m_reconnectTimer->stop();
-    m_reconnectTimer->start(m_retryMs);
+    int delayMs = m_retryMs;
+    // 直接创建一次性定时器，避免成员 QTimer 可能存在的线程事件循环问题
+    QTimer::singleShot(delayMs, this, [this, delayMs]() {
+        openSse();
+    });
 }
 
 bool QtHttpSseWorker::postMessage(const QString& payload, int retryCount) {
@@ -257,7 +311,7 @@ bool QtHttpSseWorker::postMessage(const QString& payload, int retryCount) {
             m_sessionId = QString::fromUtf8(sessionHeader);
         }
 
-        // 首次获得 sessionId：同步等待 SSE 连接建立（与 C++ 版 doPost 行为一致，最多等 5s）
+        // 首次获得 sessionId：等待 SSE 连接建立
         if (justGotSession) {
             m_reconnectTimer->stop();
             for (int i = 0; i < 50 && !m_sseConnected && !m_stopping; ++i) {
@@ -268,7 +322,7 @@ bool QtHttpSseWorker::postMessage(const QString& payload, int retryCount) {
                 loop.exec();
                 disconnect(c1); disconnect(c2);
                 if (m_sseConnected) break;
-                QTimer::singleShot(100, &loop, SLOT(quit())); loop.exec(); // wait 100ms
+                QTimer::singleShot(100, &loop, SLOT(quit())); loop.exec();
             }
         }
 
@@ -296,6 +350,7 @@ bool QtHttpSseWorker::postMessage(const QString& payload, int retryCount) {
                     if (m_reconnectTimer->isActive()) {
                         m_reconnectTimer->stop();
                         m_reconnectTimer->start(m_retryMs);
+                        m_reconnectDeadline.start();
                     }
                 });
                 postParser.setEventCallback([this](const QtSseEvent& event) {

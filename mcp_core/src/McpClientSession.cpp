@@ -1,4 +1,7 @@
 #include "mcp_core/McpClientSession.h"
+#include <iostream>
+#include <fstream>
+#include <memory>
 
 namespace mcp {
 

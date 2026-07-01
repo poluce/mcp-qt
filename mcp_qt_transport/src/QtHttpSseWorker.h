@@ -51,7 +51,10 @@ private:
     QString m_sessionId;
     QString m_lastEventId;
     int m_retryMs{2000};
+    int m_authRetryCount{0};
+    static constexpr int kMaxAuthRetries = 3;
     QElapsedTimer m_reconnectDeadline;
+    QElapsedTimer m_lastDataTime;
     bool m_stopping{false};
     bool m_sseConnected{false};
     std::function<std::string()> m_tokenProvider;
@@ -60,6 +63,7 @@ private:
     class QNetworkAccessManager* m_network{nullptr};
     QPointer<QNetworkReply> m_sseReply;
     QTimer* m_reconnectTimer{nullptr};
+    QTimer* m_healthCheckTimer{nullptr};
     QtSseParser m_parser;
 };
 

@@ -1,5 +1,6 @@
 #include "mcp_core/JsonRpcDispatcher.h"
 #include <exception>
+#include <fstream>
 
 namespace mcp {
 

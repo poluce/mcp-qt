@@ -166,8 +166,15 @@ void HttpSseTransport::close() {
     m_closed = true;
     m_running = false;
 
+    {
+        std::lock_guard<std::mutex> lock(m_clientMutex);
+        if (m_httpClient) {
+            m_httpClient->stop();
+        }
+    }
+
     if (m_sseThread.joinable()) {
-        m_sseThread.detach();
+        m_sseThread.join();
     }
 
     if (m_onClose) m_onClose();
@@ -342,21 +349,34 @@ void HttpSseTransport::sseReadLoop() {
             httplib::Result res;
 
             // 根据 scheme 选择 HTTP 或 HTTPS 客户端
+            std::unique_ptr<httplib::Client> client;
             if (scheme == "https") {
 #if defined(CPPHTTPLIB_OPENSSL_SUPPORT)
-                httplib::SSLClient sslClient(host, port);
-                sslClient.set_connection_timeout(10, 0);
-                sslClient.set_read_timeout(0, 200000);
-                sslClient.enable_server_certificate_verification(false);
-                res = sslClient.Get(path.c_str(), headers, respHandler, contentReceiver);
+                auto sslClient = std::make_unique<httplib::SSLClient>(host, port);
+                sslClient->enable_server_certificate_verification(false);
+                client = std::move(sslClient);
 #else
                 std::cerr << "[SDK httplib] HTTPS requires CPPHTTPLIB_OPENSSL_SUPPORT" << std::endl;
 #endif
             } else {
-                httplib::Client plainClient(host, port);
-                plainClient.set_connection_timeout(10, 0);
-                plainClient.set_read_timeout(0, 200000);
-                res = plainClient.Get(path.c_str(), headers, respHandler, contentReceiver);
+                client = std::make_unique<httplib::Client>(host, port);
+            }
+
+            if (client) {
+                client->set_connection_timeout(10, 0);
+                client->set_read_timeout(300, 0);
+
+                {
+                    std::lock_guard<std::mutex> lock(m_clientMutex);
+                    m_httpClient = std::move(client);
+                }
+
+                res = m_httpClient->Get(path.c_str(), headers, respHandler, contentReceiver);
+
+                {
+                    std::lock_guard<std::mutex> lock(m_clientMutex);
+                    m_httpClient.reset();
+                }
             }
 
             if (!res) {
@@ -375,17 +395,28 @@ void HttpSseTransport::sseReadLoop() {
 
         if (!m_running) break;
 
+        // SSE 连接成功时重置认证重试计数器
+        if (responseCode == 200) {
+            m_totalAuthRetries = 0;
+        }
+
         // 如果是 401/403 (或者是 conformance runner 里的 404) 尝试 auth retry
         std::string scenarioStr = "";
         const char* sEnv = std::getenv("MCP_CONFORMANCE_SCENARIO");
         if (sEnv) scenarioStr = sEnv;
+        bool authRetryTried = false;
         if ((responseCode == 401 || responseCode == 403 || (responseCode == 404 && scenarioStr.find("auth/") == 0)) && m_authRetryHandler) {
+            authRetryTried = true;
             if (m_onError) {
                 m_onError("sseReadLoop: Got " + std::to_string(responseCode) + ", attempting auth retry...");
             }
             if (m_authRetryHandler(wwwAuthenticate)) {
                 continue;
             }
+        }
+        if (authRetryTried) {
+            std::cerr << "[SDK SSE] Auth retry failed, stopping SSE read loop." << std::endl;
+            break;
         }
 
         // 连接已断开
@@ -399,19 +430,19 @@ void HttpSseTransport::sseReadLoop() {
             }
         }
 
-        // 使用 SSE retry 延迟后重连
+        // 使用 SSE retry 延迟后重连（使用 deadline 确保最小等待时间，防止 sleep_for 提前唤醒）
         {
             int delayMs = m_sseRetryMs;
-            int steps = (delayMs + 99) / 100;
-            std::cerr << "[SDK SSE] Reconnect delay=" << delayMs << "ms steps=" << steps << " lastEventId=" << m_lastEventId << std::endl;
-            for (int i = 0; i < steps && m_running; ++i) {
+            std::cerr << "[SDK SSE] Reconnect delay=" << delayMs << "ms lastEventId=" << m_lastEventId << std::endl;
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+            while (std::chrono::steady_clock::now() < deadline && m_running) {
                 {
                     std::lock_guard<std::recursive_mutex> lock(m_sendMutex);
                     if (!m_sessionId.empty() && responseCode == 400) {
                         break;
                     }
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
     }
@@ -689,11 +720,19 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
     auto initialObtainedAt = m_oauthClient->getCurrentToken().obtainedAt;
 
     std::lock_guard<std::mutex> lock(m_authMutex);
-    
+
     // Check if another thread already authenticated while we were waiting
     if (m_oauthClient->hasValidToken() && m_oauthClient->getCurrentToken().obtainedAt > initialObtainedAt) {
         std::cerr << "[SDK Auth Debug] Another thread already authenticated, skipping retry flow" << std::endl;
         return true;
+    }
+
+    // 限制认证重试次数，防止无限循环（如 scope 升级协商无限重试）
+    m_totalAuthRetries++;
+    if (m_totalAuthRetries > kMaxAuthRetries) {
+        std::cerr << "[SDK Auth Debug] Max auth retries (" << kMaxAuthRetries << ") exceeded, giving up." << std::endl;
+        if (m_onError) m_onError("[SDK Auth] Max auth retries exceeded, giving up.");
+        return false;
     }
 
     std::cerr << "[SDK Auth Debug] Received WWW-Authenticate: " << wwwAuthenticateHeader << std::endl;
@@ -701,6 +740,7 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
 
     std::string resourceMetadataUrl = extractResourceMetadataUrl(wwwAuthenticateHeader);
     std::cerr << "[SDK Auth Debug] Extracted resourceMetadataUrl: " << resourceMetadataUrl << std::endl;
+    bool metadataFallback = false;
     std::string prmJsonStr;
     nlohmann::json prmJson;
     if (resourceMetadataUrl.empty()) {
@@ -738,13 +778,40 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
 
         if (resourceMetadataUrl.empty()) {
             std::cerr << "[SDK Auth Debug] All path-based PRM attempts failed" << std::endl;
-            if (m_onError) m_onError("[SDK Auth] All path-based PRM discovery attempts failed");
-            return false;
+            // 2025-03-26 回退：直接尝试在 MCP 服务端 origin 上发现 OAuth 元数据
+            std::cerr << "[SDK Auth Debug] Falling back to direct metadata discovery at server origin..." << std::endl;
+            std::string baseUrl = m_sseUrl;
+            size_t pathStart = baseUrl.find("://");
+            if (pathStart != std::string::npos) {
+                pathStart = baseUrl.find('/', pathStart + 3);
+                if (pathStart != std::string::npos) {
+                    baseUrl = baseUrl.substr(0, pathStart);
+                }
+            }
+            OAuthServerMetadata fallbackMeta;
+            std::string fallbackErr;
+            bool metaOk = m_oauthClient->discoverMetadataSync(baseUrl, &fallbackMeta, &fallbackErr);
+            if (metaOk) {
+                std::cerr << "[SDK Auth Debug] Fallback metadata discovery success. TokenEndpoint=" << fallbackMeta.tokenEndpoint << std::endl;
+                // 用回退发现的元数据直接使用 MCP 服务 URL base 作为 issuer
+                prmJson = nlohmann::json{
+                    {"authorization_servers", nlohmann::json::array({baseUrl})}
+                };
+                metadataFallback = true;
+            } else {
+                std::cerr << "[SDK Auth Debug] Fallback metadata discovery also failed: " << fallbackErr << std::endl;
+                // 最终回退：即使无元数据也继续，用默认端点路径
+                prmJson = nlohmann::json{
+                    {"authorization_servers", nlohmann::json::array({baseUrl})}
+                };
+                metadataFallback = true;
+                m_totalAuthRetries = 0; // 重置计数器允许尝试默认端点
+            }
         }
     }
 
-    // 如果 fallback 已经取到并解析了 PRM，跳过重复获取
-    if (prmJsonStr.empty()) {
+    // 如果通过正常路径获取 PRM（非回退），从 URL 获取
+    if (!metadataFallback && prmJsonStr.empty()) {
         std::cerr << "[SDK Auth Debug] Fetching Protected Resource Metadata from: " << resourceMetadataUrl << std::endl;
         if (m_onError) m_onError("[SDK Auth] Fetching Protected Resource Metadata from " + resourceMetadataUrl);
         prmJsonStr = curlHttpGet(resourceMetadataUrl);
@@ -770,10 +837,9 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
 
     OAuthServerMetadata serverMetadata;
     std::string err;
-    std::string metadataUrl = issuerUrl;
 
-    // 如果有 PRM 指定的 metadata 路径（绝对路径），基于 MCP 服务 URL 构建
-    if (!prmMetadataLoc.empty()) {
+    // 如果是回退路径，元数据已发现，跳过 discovery
+    if (metadataFallback) {
         std::string baseUrl = m_sseUrl;
         size_t pathStart = baseUrl.find("://");
         if (pathStart != std::string::npos) {
@@ -782,17 +848,48 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
                 baseUrl = baseUrl.substr(0, pathStart);
             }
         }
-        metadataUrl = baseUrl + prmMetadataLoc;
-        std::cerr << "[SDK Auth Debug] Using PRM-specified metadata URL: " << metadataUrl << std::endl;
-    }
+        std::string fallbackErr;
+        if (!m_oauthClient->discoverMetadataSync(baseUrl, &serverMetadata, &fallbackErr)) {
+            std::cerr << "[SDK Auth Debug] Fallback metadata re-discovery failed: " << fallbackErr << std::endl;
+            // 2025-03-26 最终回退：直接使用标准 OAuth 端点路径
+            std::string registerPath = baseUrl + "/register";
+            std::string authorizePath = baseUrl + "/authorize";
+            std::string tokenPath = baseUrl + "/token";
+            std::cerr << "[SDK Auth Debug] Ultimate fallback: constructing default OAuth endpoints at base URL" << std::endl;
+            serverMetadata.registrationEndpoint = registerPath;
+            serverMetadata.authorizationEndpoint = authorizePath;
+            serverMetadata.tokenEndpoint = tokenPath;
+            serverMetadata.issuer = baseUrl;
+            // 重置 totalAuthRetries 以允许尝试这些端点
+            m_totalAuthRetries = 0;
+            std::cerr << "[SDK Auth Debug] Using default endpoints: auth=" << authorizePath << " token=" << tokenPath << " reg=" << registerPath << std::endl;
+        }
+        std::cerr << "[SDK Auth Debug] Metadata Discovery Success (fallback). TokenEndpoint=" << serverMetadata.tokenEndpoint << ", RegistrationEndpoint=" << serverMetadata.registrationEndpoint << std::endl;
+    } else {
+        std::string metadataUrl = issuerUrl;
 
-    std::cerr << "[SDK Auth Debug] Starting Metadata Discovery from: " << metadataUrl << std::endl;
-    if (!m_oauthClient->discoverMetadataSync(metadataUrl, &serverMetadata, &err)) {
-        std::cerr << "[SDK Auth Debug] Metadata discovery failed: " << err << std::endl;
-        if (m_onError) m_onError("[SDK Auth] Metadata discovery failed: " + err);
-        return false;
+        // 如果有 PRM 指定的 metadata 路径（绝对路径），基于 MCP 服务 URL 构建
+        if (!prmMetadataLoc.empty()) {
+            std::string baseUrl = m_sseUrl;
+            size_t pathStart = baseUrl.find("://");
+            if (pathStart != std::string::npos) {
+                pathStart = baseUrl.find('/', pathStart + 3);
+                if (pathStart != std::string::npos) {
+                    baseUrl = baseUrl.substr(0, pathStart);
+                }
+            }
+            metadataUrl = baseUrl + prmMetadataLoc;
+            std::cerr << "[SDK Auth Debug] Using PRM-specified metadata URL: " << metadataUrl << std::endl;
+        }
+
+        std::cerr << "[SDK Auth Debug] Starting Metadata Discovery from: " << metadataUrl << std::endl;
+        if (!m_oauthClient->discoverMetadataSync(metadataUrl, &serverMetadata, &err)) {
+            std::cerr << "[SDK Auth Debug] Metadata discovery failed: " << err << std::endl;
+            if (m_onError) m_onError("[SDK Auth] Metadata discovery failed: " + err);
+            return false;
+        }
+        std::cerr << "[SDK Auth Debug] Metadata Discovery Success. TokenEndpoint=" << serverMetadata.tokenEndpoint << ", RegistrationEndpoint=" << serverMetadata.registrationEndpoint << std::endl;
     }
-    std::cerr << "[SDK Auth Debug] Metadata Discovery Success. TokenEndpoint=" << serverMetadata.tokenEndpoint << ", RegistrationEndpoint=" << serverMetadata.registrationEndpoint << std::endl;
 
     std::string scenario = getEnvVar("MCP_CONFORMANCE_SCENARIO", "");
     std::string contextStr = getEnvVar("MCP_CONFORMANCE_CONTEXT", "{}");
@@ -1095,7 +1192,7 @@ bool HttpSseTransport::handleDefaultAuthRetry(const std::string& wwwAuthenticate
                     token.expiresIn = tokenJson.value("expires_in", 0);
                     token.obtainedAt = std::chrono::steady_clock::now();
                     m_oauthClient->setCurrentToken(token);
-                    return true;
+                        return true;
                 }
             }
             std::cerr << "[SDK Auth Debug] JWT token exchange failed" << std::endl;
