@@ -200,7 +200,7 @@ void test_qt_transport_recovery() {
 
         // 建立真实的 HTTP SSE 连接 (m_transportType = 1)
         QString url = QString("http://127.0.0.1:%1/sse").arg(port);
-        auto client = mcp_qt::McpQtClient::connectHttp(url, "test-client", "1.0.0", 1000);
+        auto client = mcp_qt::McpQtClient::connectHttpAndWait(url, "test-client", "1.0.0", 1000);
         TM_ASSERT_TRUE(client != nullptr, "Client must successfully establish initial HTTP connection");
 
         // 立即设置极低退避延时重连策略，防患于未然

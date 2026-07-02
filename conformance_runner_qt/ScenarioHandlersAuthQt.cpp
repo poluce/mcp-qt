@@ -10,7 +10,7 @@ namespace mcp_conformance {
 // ========== 基本场景（McpQtClient / Qt 原生 QNAM）==========
 
 int runInitialize(const RunnerConfig& c) {
-    auto cl = mcp_qt::McpQtClient::connectHttp(QString::fromStdString(c.serverUrl));
+    auto cl = mcp_qt::McpQtClient::connectHttpAndWait(QString::fromStdString(c.serverUrl));
     if (!cl) return 1;
     
     QEventLoop loop;
@@ -26,7 +26,7 @@ int runInitialize(const RunnerConfig& c) {
 }
 
 int runToolsCall(const RunnerConfig& c) {
-    auto cl = mcp_qt::McpQtClient::connectHttp(QString::fromStdString(c.serverUrl));
+    auto cl = mcp_qt::McpQtClient::connectHttpAndWait(QString::fromStdString(c.serverUrl));
     if (!cl) return 1;
     
     QEventLoop loop;
@@ -45,7 +45,7 @@ int runToolsCall(const RunnerConfig& c) {
 }
 
 int runSseRetry(const RunnerConfig& c) {
-    auto cl = mcp_qt::McpQtClient::connectHttp(QString::fromStdString(c.serverUrl));
+    auto cl = mcp_qt::McpQtClient::connectHttpAndWait(QString::fromStdString(c.serverUrl));
     if (!cl) return 1;
 
     QEventLoop loop;
@@ -63,23 +63,23 @@ int runSseRetry(const RunnerConfig& c) {
 }
 
 int runElicitationDefaults(const RunnerConfig& c) {
-    // 使用 createForTest + connectToTransport，确保在 initialize 前注册 handler 和 capability
+    // 使用 createForTest + connectToTransportAndWait，确保在 initialize 前注册 handler 和 capability
     auto cl = mcp_qt::McpQtClient::createForTest();
 
-    // 预注册 elicitation capability（在 connectToTransport 中会在 initialize 前生效）
+    // 预注册 elicitation capability（在 connectToTransportAndWait 中会在 initialize 前生效）
     QJsonObject ec; ec["form"] = QJsonObject{{"applyDefaults", true}};
     cl->registerCapability("elicitation", ec);
 
-    // 预置 handler（connectToTransport 中会在 start/initialize 前安装到 session）
+    // 预置 handler（connectToTransportAndWait 中会在 start/initialize 前安装到 session）
     cl->setElicitationHandler([](const QJsonObject&, std::function<void(const QJsonObject&, const QJsonObject&)> callback) {
         QJsonObject r; r["action"] = "accept"; r["content"] = QJsonObject{};
         callback(r, QJsonObject{});
     });
 
-    // 现在连接——connectToTransport 会先应用 handler 和能力，再 start 和 initialize
+    // 现在连接——connectToTransportAndWait 会先应用 handler 和能力，再 start 和 initialize
     auto t = std::make_shared<mcp_qt::QtHttpSseTransport>(c.serverUrl);
     QString errStr;
-    if (!cl->connectToTransport(t, "mcp-qt-client", "1.0.0", 10000, &errStr)) return 1;
+    if (!cl->connectToTransportAndWait(t, "mcp-qt-client", "1.0.0", 10000, &errStr)) return 1;
 
     // 使用异步 callTool 避免阻塞主线程事件循环（Qt 版 elicitation handler 需要事件循环来调度）
     QEventLoop loop;

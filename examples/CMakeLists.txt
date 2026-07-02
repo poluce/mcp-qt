@@ -1,1 +1,3 @@
 add_subdirectory(anysearch_qt)
+add_subdirectory(context7_qt)
+add_subdirectory(playwright_qt)

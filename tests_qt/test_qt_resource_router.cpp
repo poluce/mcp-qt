@@ -43,7 +43,7 @@ static std::shared_ptr<mcp_qt::McpQtClient> createIntegrationMockClient(std::sha
         }
     };
 
-    bool ok = client->connectToTransport(transport, "test-client", "1.0.0", 1000);
+    bool ok = client->connectToTransportAndWait(transport, "test-client", "1.0.0", 1000);
     if (!ok) return nullptr;
     return client;
 }

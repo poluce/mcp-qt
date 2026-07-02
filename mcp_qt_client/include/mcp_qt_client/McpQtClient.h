@@ -56,7 +56,8 @@ public:
     McpQtClientBuilder& setHttpHeaders(const QMap<QString, QString>& headers);
     McpQtClientBuilder& setHttpProxy(const QNetworkProxy& proxy);
     McpQtClientBuilder& setReconnectPolicy(const mcp::McpReconnectPolicy& policy);
-    std::shared_ptr<McpQtClient> buildAndConnect(QString* errorString = nullptr);
+    std::shared_ptr<McpQtClient> buildAndConnectAndWait(QString* errorString = nullptr);
+    std::shared_ptr<McpQtClient> buildAndConnectAsync();
 private:
     int m_transportType{0}; // 0=none, 1=http, 2=stdio, 3=stateless_http
     QString m_url_or_cmd;
@@ -104,14 +105,30 @@ public:
     // ========== 工厂（对齐 TS `new Client({name,version}).connect(transport)`）==========
 
     /// HTTP/SSE 连接
-    static Ptr connectHttp(const QString& serverUrl,
+    
+    /// HTTP/SSE 连接 (纯异步，需监听 connected() 和 errorOccurred() 信号)
+    static Ptr connectHttpAsync(const QString& serverUrl,
+                                const QString& clientName = QStringLiteral("mcp-qt-client"),
+                                const QString& clientVersion = QStringLiteral("1.0.0"));
+
+    /// Stdio 子进程连接 (纯异步)
+    static Ptr connectStdioAsync(const QString& command, const QStringList& args = {},
+                                 const QString& clientName = QStringLiteral("mcp-qt-client"),
+                                 const QString& clientVersion = QStringLiteral("1.0.0"));
+
+    /// HTTP/SSE + OAuth (纯异步)
+    static Ptr connectWithOAuthAsync(const OAuthConfig& oauth,
+                                     const QString& clientName = QStringLiteral("mcp-qt-client"),
+                                     const QString& clientVersion = QStringLiteral("1.0.0"));
+
+    static Ptr connectHttpAndWait(const QString& serverUrl,
                            const QString& clientName = QStringLiteral("mcp-qt-client"),
                            const QString& clientVersion = QStringLiteral("1.0.0"),
                            int timeoutMs = 10000,
                            QString* errorString = nullptr);
 
     /// Stdio 子进程连接
-    static Ptr connectStdio(const QString& command, const QStringList& args = {},
+    static Ptr connectStdioAndWait(const QString& command, const QStringList& args = {},
                             const QString& clientName = QStringLiteral("mcp-qt-client"),
                             const QString& clientVersion = QStringLiteral("1.0.0"),
                             int timeoutMs = 10000,
@@ -123,7 +140,7 @@ public:
     }
 
     /// HTTP/SSE + OAuth
-    static Ptr connectWithOAuth(const OAuthConfig& oauth,
+    static Ptr connectWithOAuthAndWait(const OAuthConfig& oauth,
                                 const QString& clientName = QStringLiteral("mcp-qt-client"),
                                 const QString& clientVersion = QStringLiteral("1.0.0"),
                                 int timeoutMs = 30000);
@@ -306,7 +323,12 @@ public:
     // ========== 异步连接 ==========
 
     /// 连接到已有 transport（对齐 TS `connect(transport)`）
-    bool connectToTransport(std::shared_ptr<mcp::IMcpTransport> transport,
+    
+    /// 连接到已有 transport（纯异步）
+    void connectToTransportAsync(std::shared_ptr<mcp::IMcpTransport> transport,
+                                 const QString& clientName, const QString& clientVersion);
+
+    bool connectToTransportAndWait(std::shared_ptr<mcp::IMcpTransport> transport,
                            const QString& clientName, const QString& clientVersion, int timeoutMs = 10000, QString* errorString = nullptr);
 
 signals:
@@ -329,7 +351,11 @@ signals:
 private:
     explicit McpQtClient(QObject* parent = nullptr);
 
-    bool doInitialize(const QString& clientName, const QString& clientVersion, int timeoutMs, QString* errorString = nullptr);
+    
+    void doInitializeAsync(const QString& clientName, const QString& clientVersion);
+    void setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> transport);
+
+    bool doInitializeAndWait(const QString& clientName, const QString& clientVersion, int timeoutMs, QString* errorString = nullptr);
     bool doOAuth(const OAuthConfig& oauth);
 
     static nlohmann::json toNlohmann(const QJsonObject& obj);

@@ -19,10 +19,10 @@ void test_qt_connect_stdio_integration() {
          << R"(while (`$line = [Console]::ReadLine()) { if (`$line -match '"id":\s*([0-9]+)') { `$id = `$Matches[1]; [Console]::WriteLine('{"jsonrpc":"2.0","id":' + `$id + ',"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"mock-stdio","version":"1.0"}}}'); [Console]::Out.Flush() } })";
 
     QString err;
-    auto client = mcp_qt::McpQtClient::connectStdio("powershell", args, "test-client", "1.0", 20000, &err);
+    auto client = mcp_qt::McpQtClient::connectStdioAndWait("powershell", args, "test-client", "1.0", 20000, &err);
     
     if (client == nullptr) {
-        std::cout << "connectStdio failed with error: " << err.toStdString() << std::endl;
+        std::cout << "connectStdioAndWait failed with error: " << err.toStdString() << std::endl;
     }
     TM_ASSERT_TRUE(client != nullptr, "client should successfully start and initialize over stdio");
     if (client) {

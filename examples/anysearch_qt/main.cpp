@@ -23,7 +23,7 @@ int main(int argc, char *argv[]) {
     qInfo() << "Starting AnySearch MCP server via HTTP SSE...";
     
     // AnySearch 原生支持 Streamable HTTP/SSE，使用直接网络连接避免 npx 代理的控制台日志污染
-    auto client = McpQtClient::connectHttp("https://api.anysearch.com/mcp", "AnySearchExample", "1.0", 60000);
+    auto client = McpQtClient::connectHttpAndWait("https://api.anysearch.com/mcp", "AnySearchExample", "1.0", 60000);
     if (!client || !client->isConnected()) {
         qCritical() << "Failed to connect to AnySearch MCP Server!";
         return -1;
