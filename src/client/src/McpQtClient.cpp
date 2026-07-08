@@ -2179,6 +2179,7 @@ void McpQtClient::fetchAllToolsAsync() {
                         safeClient->m_toolCache[t.name] = t;
                     }
                     emit safeClient->toolsReady(*accumulated);
+                    emit safeClient->toolsChanged(*accumulated);
                 }
             });
         }
@@ -2247,6 +2248,7 @@ void McpQtClient::fetchAllToolsAsync(std::function<void(const std::vector<McpQtT
                         safeClient->m_toolCache[t.name] = t;
                     }
                     emit safeClient->toolsReady(*accumulated);
+                    emit safeClient->toolsChanged(*accumulated);
                 }
                 if (*cb) (*cb)(*accumulated);
             });
