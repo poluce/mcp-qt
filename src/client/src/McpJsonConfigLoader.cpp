@@ -62,7 +62,6 @@ QList<McpServerConfig> McpJsonConfigLoader::load() {
         McpServerConfig cfg;
         cfg.serverName = it.key();
         cfg.disabled = serverCfg.value(QStringLiteral("disabled")).toBool(false);
-        if (cfg.disabled) continue;
 
         if (serverCfg.contains(QStringLiteral("command"))) {
             cfg.command = interpolateEnv(serverCfg.value(QStringLiteral("command")).toString());

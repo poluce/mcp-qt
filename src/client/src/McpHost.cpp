@@ -88,7 +88,7 @@ bool McpHost::loadConfigs(const QList<McpServerConfig>& configs) {
 
 void McpHost::addServerConfig(const McpServerConfig& config) {
     m_loadedConfigs.append(config);
-    m_enabledServers.insert(config.serverName, true);
+    m_enabledServers.insert(config.serverName, !config.disabled);
 }
 
 void McpHost::clearConfig() {
