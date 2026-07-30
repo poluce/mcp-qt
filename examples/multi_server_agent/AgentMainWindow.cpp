@@ -129,6 +129,11 @@ AgentMainWindow::AgentMainWindow(QWidget* parent)
     connect(m_host, &mcp_qt::McpHost::errorOccurred, this, [this](const QString& name, const mcp_qt::McpError& err) {
         appendLogHtml(QString("<div style='color:red;'>[Error] %1: %2</div>").arg(name, err.message));
     });
+
+    connect(m_host, &mcp_qt::McpHost::inputRequired, this, [this](const QString& srvName, const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback cb) {
+        appendLogHtml(QString("<div style='color:#e67e22;'><b>[MRTR 2026-07-28 多轮交互]</b> 节点 %1 请求补充输入 (ReqID: %2)</div>").arg(srvName, reqId));
+        cb(QJsonObject{{QStringLiteral("password"), QStringLiteral("demo-secret")}});
+    });
 }
 
 void AgentMainWindow::initUi() {

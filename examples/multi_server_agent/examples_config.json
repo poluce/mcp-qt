@@ -8,6 +8,11 @@
             "type": "sse",
             "url": "https://api.anysearch.com/mcp"
         },
+        "stateless-http-demo": {
+            "type": "stateless_http",
+            "url": "http://127.0.0.1:8080/mcp",
+            "protocolVersion": "2026-07-28"
+        },
         "context7": {
             "args": [
                 "-y",

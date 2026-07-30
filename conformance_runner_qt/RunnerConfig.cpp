@@ -17,6 +17,17 @@ bool parseRunnerConfig(
         if (arg.rfind("http://", 0) == 0 || arg.rfind("https://", 0) == 0) {
             cfg.serverUrl = arg;
             cfg.httpMode = true;
+        } else if ((arg == "--protocol" || arg == "-protocol") && i + 1 < argc) {
+            cfg.protocolVersion = argv[++i];
+        } else if (arg == "--stateless" || arg == "-stateless") {
+            cfg.protocolVersion = "2026-07-28";
+        }
+    }
+
+    if (cfg.protocolVersion.empty()) {
+        const char* protoEnv = std::getenv("MCP_PROTOCOL_VERSION");
+        if (protoEnv && *protoEnv) {
+            cfg.protocolVersion = protoEnv;
         }
     }
 

@@ -66,6 +66,7 @@ signals:
     void globalPromptsChanged();
     void globalResourcesChanged();
     void errorOccurred(const QString& serverName, const mcp_qt::McpError& error);
+    void inputRequired(const QString& serverName, const QString& requestId, const QJsonObject& inputSchema, mcp_qt::MrtrReplyCallback replyCallback);
 
 private:
     void handleAllToolsReady();

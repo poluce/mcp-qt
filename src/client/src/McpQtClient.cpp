@@ -310,6 +310,8 @@ McpQtClientBuilder& McpQtClientBuilder::setEnvironment(const QMap<QString, QStri
 McpQtClientBuilder& McpQtClientBuilder::setHttpHeaders(const QMap<QString, QString>& headers) { m_httpHeaders = headers; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setHttpProxy(const QNetworkProxy& proxy) { m_proxy = proxy; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setReconnectPolicy(const mcp::McpReconnectPolicy& policy) { m_reconnectPolicy = policy; return *this; }
+McpQtClientBuilder& McpQtClientBuilder::setProtocolVersion(const QString& version) { m_protocolVersion = version; return *this; }
+McpQtClientBuilder& McpQtClientBuilder::setStatelessMode(bool enabled) { m_statelessMode = enabled; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setNamespace(const QString& ns) {
     m_namespace = ns;
     return *this;
@@ -329,6 +331,8 @@ std::shared_ptr<McpQtClient> McpQtClientBuilder::buildAndConnectAndWait(QString*
     c->m_clientVersion = m_clientVersion;
     c->m_timeoutMs = m_timeoutMs;
     c->m_reconnectPolicy = m_reconnectPolicy;
+    c->setProtocolVersion(m_protocolVersion);
+    c->setStatelessMode(m_statelessMode);
 
     if (m_transportType == 1) {
         c->m_httpHeaders = m_httpHeaders;
@@ -522,6 +526,8 @@ bool McpQtClient::runSyncWithTimeout(Initiator&& initiator, int timeoutMs) {
 void McpQtClient::setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> t) {
     m_session = std::make_shared<mcp::McpClientSession>(t);
     m_session->init();
+    m_session->setProtocolVersion(m_protocolVersion.toStdString());
+    m_session->setStatelessMode(m_statelessMode);
     
     nlohmann::json caps = m_clientCapabilities;
     if (caps.is_null() || caps.empty()) {
@@ -2347,6 +2353,8 @@ std::shared_ptr<McpQtClient> McpQtClientBuilder::buildAndConnectAsync() {
     c->m_clientVersion = m_clientVersion;
     c->m_timeoutMs = m_timeoutMs;
     c->m_reconnectPolicy = m_reconnectPolicy;
+    c->setProtocolVersion(m_protocolVersion);
+    c->setStatelessMode(m_statelessMode);
 
     if (m_transportType == 1) {
         c->m_httpHeaders = m_httpHeaders;
@@ -2457,6 +2465,24 @@ void McpQtClient::doInitializeAsync(const QString& name, const QString& ver) {
             }, Qt::QueuedConnection);
         }
     });
+}
+
+void McpQtClient::setStatelessMode(bool enabled) {
+    m_statelessMode = enabled;
+    if (m_session) {
+        m_session->setStatelessMode(enabled);
+    }
+}
+
+bool McpQtClient::isStatelessMode() const {
+    return m_statelessMode || (m_session ? m_session->isStatelessMode() : false);
+}
+
+void McpQtClient::setProtocolVersion(const QString& version) {
+    m_protocolVersion = version;
+    if (m_session) {
+        m_session->setProtocolVersion(version.toStdString());
+    }
 }
 
 } // namespace mcp_qt

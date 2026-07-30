@@ -35,6 +35,8 @@ class IMcpTransport;
 
 namespace mcp_qt {
 
+using MrtrReplyCallback = std::function<void(const QJsonObject& userResponse)>;
+
 enum class McpContentKind {
     Text,
     Image,
@@ -91,6 +93,8 @@ public:
     McpQtClientBuilder& setHttpHeaders(const QMap<QString, QString>& headers);
     McpQtClientBuilder& setHttpProxy(const QNetworkProxy& proxy);
     McpQtClientBuilder& setReconnectPolicy(const mcp::McpReconnectPolicy& policy);
+    McpQtClientBuilder& setProtocolVersion(const QString& version);
+    McpQtClientBuilder& setStatelessMode(bool enabled);
     std::shared_ptr<McpQtClient> buildAndConnectAndWait(QString* errorString = nullptr);
     std::shared_ptr<McpQtClient> buildAndConnectAsync();
 private:
@@ -100,6 +104,8 @@ private:
     QStringList m_args;
     QString m_clientName{QStringLiteral("mcp-qt-client")};
     QString m_clientVersion{QStringLiteral("1.0.0")};
+    QString m_protocolVersion{QStringLiteral("2026-07-28")};
+    bool m_statelessMode{false};
     int m_timeoutMs{10000};
     QMap<QString, QString> m_env;
     QMap<QString, QString> m_httpHeaders;
@@ -197,6 +203,10 @@ public:
     QJsonObject serverCapabilities() const;
     QString negotiatedProtocolVersion() const;
     QString instructions() const;
+
+    void setStatelessMode(bool enabled);
+    bool isStatelessMode() const;
+    void setProtocolVersion(const QString& version);
 
     // 便捷能力检测
     bool hasToolsCapability() const;
@@ -443,6 +453,9 @@ signals:
     void disconnected();
     void errorOccurred(const mcp_qt::McpError& error);
     
+    /// MCP 2026-07-28 MRTR: 服务端在无状态模式下触发 input_required 状态，请求用户补全参数
+    void inputRequired(const QString& requestId, const QJsonObject& inputSchema, mcp_qt::MrtrReplyCallback replyCallback);
+
     /// 收到服务端的任意通知
     void notificationReceived(const QString& method, const QJsonObject& params);
     // 协议规范事件：服务端列表变更通知
@@ -499,6 +512,8 @@ private:
     std::optional<QNetworkProxy> m_proxy;
     QString m_clientName{QStringLiteral("mcp-qt-client")};
     QString m_clientVersion{QStringLiteral("1.0.0")};
+    QString m_protocolVersion{QStringLiteral("2026-07-28")};
+    bool m_statelessMode{false};
     int m_timeoutMs{10000};
 
     mcp::McpReconnectPolicy m_reconnectPolicy;

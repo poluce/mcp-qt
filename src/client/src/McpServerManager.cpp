@@ -47,6 +47,8 @@ void McpServerManager::configureBuilder(McpQtClientBuilder& builder, const McpSe
     if (!cfg.headers.isEmpty()) builder.setHttpHeaders(cfg.headers);
     builder.setClientInfo(cfg.serverName, QStringLiteral("1.0.0"));
     if (!cfg.nameSpace.isEmpty()) builder.setNamespace(cfg.nameSpace);
+    if (!cfg.protocolVersion.isEmpty()) builder.setProtocolVersion(cfg.protocolVersion);
+    if (cfg.type == QStringLiteral("stateless_http")) builder.setStatelessMode(true);
 }
 
 bool McpServerManager::loadServers(const QList<McpServerConfig>& configs) {
@@ -256,6 +258,9 @@ void McpServerManager::setupClientSignals(const QString& serverName, const std::
     });
     connect(client.get(), &McpQtClient::promptsChanged, this, [this, serverName]() {
         emit clientPromptsChanged(serverName);
+    });
+    connect(client.get(), &McpQtClient::inputRequired, this, [this, serverName](const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback cb) {
+        emit clientInputRequired(serverName, reqId, schema, cb);
     });
 }
 

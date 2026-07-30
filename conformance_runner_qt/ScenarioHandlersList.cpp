@@ -11,8 +11,13 @@ int runToolsList(const RunnerConfig& config) {
     session->init();
     if (!session->start()) return 1;
 
-    nlohmann::json serverInfo;
-    if (!session->initializeSync("mcp-conformance-client-cpp", "1.0.0", &serverInfo)) return 1;
+    if (config.protocolVersion == "2026-07-28") {
+        session->setStatelessMode(true);
+        session->setProtocolVersion("2026-07-28");
+    } else {
+        nlohmann::json serverInfo;
+        if (!session->initializeSync("mcp-conformance-client-cpp", "1.0.0", &serverInfo)) return 1;
+    }
 
     nlohmann::json err;
     session->listToolsSync(std::chrono::milliseconds(10000), &err);

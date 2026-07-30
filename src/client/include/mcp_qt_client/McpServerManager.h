@@ -69,6 +69,8 @@ signals:
     void clientPromptsChanged(const QString& serverName);
     void clientStateChanged(const QString& serverName, mcp_qt::McpServerState state);
 
+    /// 某个服务器由于 MRTR 需要用户补充输入
+    void clientInputRequired(const QString& serverName, const QString& requestId, const QJsonObject& inputSchema, mcp_qt::MrtrReplyCallback replyCallback);
     /// 某个服务器的工具预热完成（首次连接后的 fetchAllToolsAsync 完成）
     void clientToolsReady(const QString& serverName, int toolCount);
     /// 所有已注册服务器的工具预热全部完成

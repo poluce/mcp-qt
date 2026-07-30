@@ -55,6 +55,9 @@ McpHost::McpHost(QObject* parent)
     connect(m_manager, &McpServerManager::clientPromptsChanged, this, [this]() {
         emit globalPromptsChanged();
     });
+    connect(m_manager, &McpServerManager::clientInputRequired, this, [this](const QString& serverName, const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback cb) {
+        emit inputRequired(serverName, reqId, schema, cb);
+    });
 }
 
 McpHost::~McpHost() {

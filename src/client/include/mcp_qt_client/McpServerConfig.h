@@ -21,6 +21,7 @@ struct McpServerConfig {
     // Common
     QMap<QString, QString> env;
     QMap<QString, QString> headers;
+    QString protocolVersion;
 };
 
 } // namespace mcp_qt

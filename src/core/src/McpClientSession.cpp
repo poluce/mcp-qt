@@ -124,6 +124,8 @@ int64_t McpClientSession::sendRequest(const std::string& method, const json& par
         id = m_nextId++;
         m_lastRequestId.store(id);
         m_pendingRequests[id] = PendingRequest{
+            method,
+            params,
             std::move(callback),
             std::chrono::steady_clock::now()
         };
@@ -138,6 +140,9 @@ int64_t McpClientSession::sendRequest(const std::string& method, const json& par
         {"method", method},
         {"params", params}
     };
+
+    // 2026-07-28 无状态模式下自动充实 self-contained _meta 元数据（兼容标准命名空间全称）
+    injectStatelessMeta(requestMsg["params"]);
 
     if (hasProgress) {
         if (!requestMsg["params"].is_object()) {
@@ -217,11 +222,15 @@ void McpClientSession::handleResponse(const json& responseJson) {
     }
 
     ResponseCallback cb;
+    std::string reqMethod;
+    json reqParams;
     bool found = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_pendingRequests.find(id);
         if (it != m_pendingRequests.end()) {
+            reqMethod = it->second.method;
+            reqParams = it->second.params;
             cb = std::move(it->second.callback);
             m_pendingRequests.erase(it);
             found = true;
@@ -238,6 +247,36 @@ void McpClientSession::handleResponse(const json& responseJson) {
     if (cb) {
         json result = responseJson.contains("result") ? responseJson["result"] : json::object();
         json error = responseJson.contains("error") ? responseJson["error"] : json::object();
+
+        // MCP 2026-07-28 MRTR: 拦截 status/resultType: "input_required" 挂起状态
+        bool isInputRequired = result.is_object() && 
+            ((result.contains("status") && result["status"] == "input_required") ||
+             (result.contains("resultType") && result["resultType"] == "input_required"));
+
+        if (isInputRequired) {
+            MrtrInputHandler mrtrHandler;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                mrtrHandler = m_mrtrHandler;
+            }
+            if (mrtrHandler) {
+                json schema = json::object();
+                if (result.contains("inputSchema")) {
+                    schema = result["inputSchema"];
+                } else if (result.contains("inputRequests")) {
+                    schema = result["inputRequests"];
+                }
+                log(LogLevel::Info, "Intercepted MRTR input_required status for request id=" + std::to_string(id));
+                std::weak_ptr<McpClientSession> weakSelf = shared_from_this();
+                mrtrHandler(schema, reqParams, [weakSelf, reqMethod, reqParams, cb](const json& userInputs) {
+                    if (auto self = weakSelf.lock()) {
+                        self->resendMrtrRequest(reqMethod, reqParams, userInputs, cb);
+                    }
+                });
+                return;
+            }
+        }
+
         cb(result, error);
     }
 }
@@ -343,6 +382,11 @@ void McpClientSession::handleRequestFromServer(const json& requestJson) {
 
 void McpClientSession::initialize(const std::string& clientName, const std::string& clientVersion,
                                   std::function<void(bool success, const json& serverInfo)> callback) {
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_clientName = clientName;
+        m_clientVersion = clientVersion;
+    }
     SessionState expected = SessionState::Uninitialized;
     if (!m_state.compare_exchange_strong(expected, SessionState::Initializing)) {
         json err = {
@@ -431,7 +475,7 @@ void McpClientSession::initialize(const std::string& clientName, const std::stri
 }
 
 void McpClientSession::shutdown(std::function<void(bool success)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false);
         return;
     }
@@ -453,7 +497,7 @@ void McpClientSession::listTools(std::function<void(const std::vector<McpTool>& 
 }
 
 void McpClientSession::listTools(const std::string& cursor, std::function<void(const std::vector<McpTool>& tools, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback({}, "", notInitializedError());
         return;
     }
@@ -491,7 +535,7 @@ void McpClientSession::listTools(const std::string& cursor, std::function<void(c
 void McpClientSession::callTool(const std::string& name, const json& arguments,
                                 std::function<void(const json& content, const json& error)> callback,
                                 ProgressCallback progressCallback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -516,7 +560,7 @@ void McpClientSession::listResources(std::function<void(const json& result, cons
 }
 
 void McpClientSession::listResources(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), "", notInitializedError());
         return;
     }
@@ -538,7 +582,7 @@ void McpClientSession::listResources(const std::string& cursor, std::function<vo
 }
 
 void McpClientSession::readResource(const std::string& uri, std::function<void(const json& result, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -551,7 +595,7 @@ void McpClientSession::readResource(const std::string& uri, std::function<void(c
 }
 
 void McpClientSession::subscribeResource(const std::string& uri, std::function<void(bool success, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false, notInitializedError());
         return;
     }
@@ -568,7 +612,7 @@ void McpClientSession::subscribeResource(const std::string& uri, std::function<v
 }
 
 void McpClientSession::unsubscribeResource(const std::string& uri, std::function<void(bool success, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false, notInitializedError());
         return;
     }
@@ -591,7 +635,7 @@ void McpClientSession::listPrompts(std::function<void(const json& result, const 
 }
 
 void McpClientSession::listPrompts(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), "", notInitializedError());
         return;
     }
@@ -613,7 +657,7 @@ void McpClientSession::listPrompts(const std::string& cursor, std::function<void
 }
 
 void McpClientSession::getPrompt(const std::string& name, const json& arguments, std::function<void(const json& result, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -954,7 +998,7 @@ std::string McpClientSession::callToolSyncRaw(const std::string& name, const std
 // ==========================================
 
 void McpClientSession::ping(std::function<void(bool success, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false, notInitializedError());
         return;
     }
@@ -993,7 +1037,7 @@ void McpClientSession::listResourceTemplates(std::function<void(const std::vecto
 }
 
 void McpClientSession::listResourceTemplates(const std::string& cursor, std::function<void(const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback({}, "", notInitializedError());
         return;
     }
@@ -1070,7 +1114,7 @@ std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(con
 // ==========================================
 
 void McpClientSession::complete(const json& ref, const json& argument, std::function<void(const json& completion, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -1104,6 +1148,9 @@ json McpClientSession::completeSync(const json& ref, const json& argument,
 // ==========================================
 
 void McpClientSession::setSamplingHandler(SamplingHandler handler) {
+    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+        log(LogLevel::Warning, "Feature 'sampling' is deprecated in MCP 2026-07-28 specification but maintained for backwards compatibility.");
+    }
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_samplingHandler = std::move(handler);
@@ -1176,8 +1223,50 @@ void McpClientSession::setElicitationHandler(ElicitationHandler handler) {
 // ==========================================
 
 void McpClientSession::setRootsProvider(RootsProvider provider) {
+    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+        log(LogLevel::Warning, "Feature 'roots' is deprecated in MCP 2026-07-28 specification but maintained for backwards compatibility.");
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_rootsProvider = std::move(provider);
+}
+
+void McpClientSession::setMrtrHandler(MrtrInputHandler handler) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_mrtrHandler = std::move(handler);
+}
+
+void McpClientSession::injectStatelessMeta(json& params) {
+    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+        if (!params.is_object()) {
+            params = json::object();
+        }
+        if (!params.contains("_meta") || !params["_meta"].is_object()) {
+            params["_meta"] = json::object();
+        }
+        auto& meta = params["_meta"];
+        std::string ver = m_negotiatedProtocolVersion.empty() ? "2026-07-28" : m_negotiatedProtocolVersion;
+        json clientInfoObj = {{"name", m_clientName}, {"version", m_clientVersion}};
+
+        meta["protocolVersion"] = ver;
+        meta["io.modelcontextprotocol/protocolVersion"] = ver;
+        meta["clientInfo"] = clientInfoObj;
+        meta["io.modelcontextprotocol/clientInfo"] = clientInfoObj;
+        meta["capabilities"] = m_capabilities;
+        meta["io.modelcontextprotocol/clientCapabilities"] = m_capabilities;
+    }
+}
+
+void McpClientSession::resendMrtrRequest(const std::string& method, json params, const json& userInputs, ResponseCallback callback) {
+    if (!params.is_object()) {
+        params = json::object();
+    }
+    if (!params.contains("_meta") || !params["_meta"].is_object()) {
+        params["_meta"] = json::object();
+    }
+    params["_meta"]["mrtr_input"] = userInputs;
+    params["_meta"]["inputResponses"] = userInputs;
+    log(LogLevel::Info, "Resending MRTR request method=" + method + " with mrtr_input & inputResponses");
+    sendRequest(method, params, std::move(callback));
 }
 
 void McpClientSession::notifyRootsListChanged() {
@@ -1269,6 +1358,20 @@ void McpClientSession::setTrafficCallback(TrafficCallback callback) {
 void McpClientSession::setProtocolVersion(const std::string& version) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_overrideProtocolVersion = version;
+}
+
+void McpClientSession::setStatelessMode(bool enabled) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_statelessMode = enabled;
+}
+
+bool McpClientSession::isStatelessMode() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_statelessMode;
+}
+
+bool McpClientSession::isReady() const {
+    return m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28" || m_state == SessionState::Initialized;
 }
 
 void McpClientSession::log(LogLevel level, const std::string& message) {

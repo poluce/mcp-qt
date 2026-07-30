@@ -8,9 +8,9 @@
 
 ---
 
-## 官方合规
+## 官方合规与最新规范支持
 
-**测试日期**：2026-07-07 | **协议版本**：2025-11-25
+**协议版本支持**：`2026-07-28`（完全无状态核心 Stateless Core、MRTR 多轮次交互、`_meta` 数据自包含、网关 Header 路由）、`2025-11-25`（向后兼容）
 
 | 套件 | 场景数 | 通过 | 警告 | 失败 | 通过率 |
 |------|:------:|:----:|:----:|:----:|:------:|
@@ -76,6 +76,21 @@ auto authClient = mcp_qt::McpQtClient::connectWithOAuthAndWait(oa);
 
 // 本地 Stdio 子进程连接
 auto stdioClient = mcp_qt::McpQtClient::connectStdioAndWait("python", {"server.py"});
+
+// 🌟 MCP 2026-07-28 无状态 HTTP 节点（云原生免握手 & Header 路由）
+auto statelessClient = mcp_qt::McpQtClientBuilder()
+    .setTransportStatelessHttp("http://localhost:8080/mcp")
+    .setProtocolVersion("2026-07-28")
+    .setStatelessMode(true)
+    .buildAndConnectAsync();
+
+// 🌟 MCP 2026-07-28 MRTR 多轮次交互信号监听（用于 Qt GUI / QML 弹窗交互）
+QObject::connect(statelessClient.get(), &mcp_qt::McpQtClient::inputRequired,
+                 [](const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback replyCb) {
+    qDebug() << "Server requested additional input for request:" << reqId << "Schema:" << schema;
+    // 用户弹窗确认后回传补充输入
+    replyCb(QJsonObject{{"password", "secret123"}});
+});
 
 // 双向能力（处理来自服务端的请求）
 client->setElicitationHandler([](const QJsonObject& params, auto callback) { ...; callback(result, error); });

@@ -18,7 +18,7 @@ void test_multi_server_agent_diagnostics_groups_entries_by_stage() {
 
     TM_ASSERT_TRUE(logText.contains(QStringLiteral("Loaded config and discovered tools")),
                    "execution log should be rendered separately");
-    TM_ASSERT_TRUE(text.contains(QStringLiteral("SDK Diagnostic Report")),
+    TM_ASSERT_TRUE(text.contains(QStringLiteral("MCP Diagnostic Report")),
                    "report should contain the report header");
     TM_ASSERT_TRUE(text.contains(QStringLiteral("[tool/discovery]")),
                    "report should contain the discovery stage");

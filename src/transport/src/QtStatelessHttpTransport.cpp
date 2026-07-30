@@ -69,11 +69,20 @@ void QtStatelessHttpTransport::applyCommonHeaders(QNetworkRequest& request, bool
 bool QtStatelessHttpTransport::send(const std::string& message) {
     if (!m_isRunning || !m_nam) return false;
 
-    // 检测是否是 initialized 通知（nlohmann::parse 带 nfp 参数时不会抛异常）
+    // 检测 method 与 tool name，用于 HTTP Header 路由
     bool isInitializedNotification = false;
+    std::string methodStr;
+    std::string toolNameStr;
     auto json = nlohmann::json::parse(message, nullptr, false);
     if (!json.is_discarded() && json.contains("method") && json["method"].is_string()) {
-        isInitializedNotification = (json["method"].get<std::string>() == "notifications/initialized");
+        methodStr = json["method"].get<std::string>();
+        isInitializedNotification = (methodStr == "notifications/initialized");
+        if (methodStr == "tools/call" && json.contains("params") && json["params"].is_object()) {
+            const auto& params = json["params"];
+            if (params.contains("name") && params["name"].is_string()) {
+                toolNameStr = params["name"].get<std::string>();
+            }
+        }
     }
 
     // 缓存请求数据用于重试（非重试状态下）
@@ -83,6 +92,14 @@ bool QtStatelessHttpTransport::send(const std::string& message) {
 
     QNetworkRequest request(m_endpointUrl);
     applyCommonHeaders(request);
+
+    // MCP 2026-07-28 Header 路由扩展
+    if (!methodStr.empty()) {
+        request.setRawHeader("Mcp-Method", QByteArray::fromStdString(methodStr));
+    }
+    if (!toolNameStr.empty()) {
+        request.setRawHeader("Mcp-Name", QByteArray::fromStdString(toolNameStr));
+    }
 
     QByteArray data = QByteArray::fromStdString(message);
     QNetworkReply* reply = m_nam->post(request, data);

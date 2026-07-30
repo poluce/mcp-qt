@@ -46,6 +46,7 @@ public:
 
     // 客户端支持的协议版本列表（按优先级排序，最新在前）
     static inline const std::vector<std::string> SUPPORTED_PROTOCOL_VERSIONS = {
+        "2026-07-28",
         "2025-11-25",
         "2025-06-18",
         "2025-03-26"
@@ -76,7 +77,15 @@ public:
      */
     using RootsProvider = std::function<void(std::function<void(const json& result, const json& error)> callback)>;
 
+    /**
+     * @brief Handler for MRTR (Multi Round-Trip Requests) when server responds with input_required status.
+     *        Calls callback with user inputs json to resume the stateless request.
+     */
+    using MrtrInputHandler = std::function<void(const json& inputSchema, const json& requestParams, std::function<void(const json& userInputs)> callback)>;
+
     struct PendingRequest {
+        std::string method;
+        json params;
         ResponseCallback callback;
         std::chrono::steady_clock::time_point timestamp;
     };
@@ -272,6 +281,12 @@ public:
     void setRootsProvider(RootsProvider provider);
 
     /**
+     * @brief Register a handler for MRTR (Multi Round-Trip Requests) status: input_required.
+     *        When the server in stateless mode requires additional user input, the handler is triggered.
+     */
+    void setMrtrHandler(MrtrInputHandler handler);
+
+    /**
      * @brief Notify the server that the roots list has changed.
      *        Sends notifications/roots/list_changed.
      */
@@ -383,6 +398,15 @@ public:
      */
     void setProtocolVersion(const std::string& version);
 
+    /**
+     * @brief Enable or disable stateless mode (MCP 2026-07-28 core capability).
+     *        In stateless mode, requests carry self-contained _meta headers and do not
+     *        require explicit initialize handshake.
+     */
+    void setStatelessMode(bool enabled);
+    bool isStatelessMode() const;
+    bool isReady() const;
+
     void registerCapabilities(const json& capabilities);
     std::string getNegotiatedProtocolVersion() const;
     json getServerCapabilities() const;
@@ -397,6 +421,8 @@ private:
     void handleResponse(const json& responseJson);
     void handleNotification(const json& notificationJson);
     void handleRequestFromServer(const json& requestJson);
+    void resendMrtrRequest(const std::string& method, json params, const json& userInputs, ResponseCallback callback);
+    void injectStatelessMeta(json& params);
 
     void log(LogLevel level, const std::string& message);
     void emitTrafficEvent(McpTrafficDirection dir, McpTrafficKind kind, const json& payload, const std::string& raw);
@@ -421,6 +447,7 @@ private:
     SamplingHandler m_samplingHandler;
     ElicitationHandler m_elicitationHandler;
     RootsProvider m_rootsProvider;
+    MrtrInputHandler m_mrtrHandler;
 
     // 通知去重状态
     struct DebounceState {
@@ -438,6 +465,9 @@ private:
         {"sampling", json::object()},
         {"elicitation", {{"modes", {"form", "url"}}}}
     };
+    bool m_statelessMode{false};
+    std::string m_clientName{"mcp-qt-client"};
+    std::string m_clientVersion{"1.0.0"};
     std::string m_negotiatedProtocolVersion;
     std::string m_overrideProtocolVersion;
     json m_serverCapabilities;

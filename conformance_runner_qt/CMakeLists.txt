@@ -4,6 +4,7 @@ add_executable(mcp_client_conformance_qt
     ScenarioHandlersList.cpp
     ScenarioContext.cpp
     ScenarioHandlersAuthQt.cpp
+    ScenarioHandlersStateless.cpp
     ConsoleStdioTransport.cpp
     main_qt.cpp
 )
