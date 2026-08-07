@@ -23,6 +23,9 @@
 
 namespace mcp_conformance {
 
+// 定义于 ScenarioHandlersAuthQt.cpp（legacy initialize 握手路径）
+int runToolsCall(const RunnerConfig& c);
+
 using mcp::McpClientSession;
 using mcp_qt::QtStatelessHttpTransport;
 using nlohmann::json;
@@ -86,8 +89,12 @@ static void installAutoMrtrHandler(std::shared_ptr<McpClientSession> session) {
     });
 }
 
-// ========== tools_call（2026-07-28 无状态变体） ==========
+// ========== tools_call（按 spec-version 兼容新旧协议） ==========
+// 2026-07-28 变体走 stateless；2025-11-25 及更早走 legacy initialize 握手。
 int runToolsCall2026(const RunnerConfig& c) {
+    if (c.protocolVersion != "2026-07-28") {
+        return runToolsCall(c);
+    }
     std::string err;
     auto session = connectStateless(c, &err);
     if (!session) {
