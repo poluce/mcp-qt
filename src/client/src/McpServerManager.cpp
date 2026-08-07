@@ -259,8 +259,8 @@ void McpServerManager::setupClientSignals(const QString& serverName, const std::
     connect(client.get(), &McpQtClient::promptsChanged, this, [this, serverName]() {
         emit clientPromptsChanged(serverName);
     });
-    connect(client.get(), &McpQtClient::inputRequired, this, [this, serverName](const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback cb) {
-        emit clientInputRequired(serverName, reqId, schema, cb);
+    connect(client.get(), &McpQtClient::inputRequired, this, [this, serverName](const QString& reqId, const QJsonObject& inputRequests, const QString& requestState, mcp_qt::MrtrReplyCallback cb) {
+        emit clientInputRequired(serverName, reqId, inputRequests, requestState, cb);
     });
 }
 

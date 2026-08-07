@@ -16,6 +16,52 @@ namespace {
         }
         return McpTrafficKind::Unknown;
     }
+
+    /**
+     * @brief Normalize the handler's reply into a spec-conformant InputResponses map.
+     *
+     * The official 2026-07-28 InputResponses object is a map whose keys match the
+     * InputRequests keys (values are ElicitResult / CreateMessageResult / ListRootsResult).
+     *
+     * Two accepted shapes from the application handler:
+     *   1. Already keyed by request id (top-level keys match inputRequests keys) -> used as-is.
+     *   2. A single input request was present and the handler returned flat {field: value}
+     *      form data -> wrapped into { "<key>": { "action": "accept", "content": {...} } }.
+     */
+    json normalizeInputResponses(const json& inputRequests, const json& raw) {
+        if (!raw.is_object()) {
+            return raw.is_null() ? json::object() : json{{"value", raw}};
+        }
+        if (inputRequests.is_object() && !inputRequests.empty()) {
+            bool topLevelMatches = true;
+            for (auto it = inputRequests.begin(); it != inputRequests.end(); ++it) {
+                if (!raw.contains(it.key())) {
+                    topLevelMatches = false;
+                    break;
+                }
+            }
+            if (topLevelMatches) return raw;
+
+            if (inputRequests.size() == 1) {
+                const std::string key = inputRequests.begin().key();
+                const json& req = inputRequests.begin().value();
+                std::string method = req.is_object() && req.contains("method") && req["method"].is_string()
+                                         ? req["method"].get<std::string>()
+                                         : std::string();
+                json wrapped;
+                if (method == "elicitation/create") {
+                    wrapped = {{"action", "accept"}, {"content", raw}};
+                } else {
+                    wrapped = raw;
+                }
+                json result;
+                result[key] = wrapped;
+                return result;
+            }
+        }
+        // Cannot determine mapping; pass through (server SHOULD ignore unknown keys).
+        return raw;
+    }
 }
 
 void McpClientSession::emitTrafficEvent(McpTrafficDirection dir, McpTrafficKind kind,
@@ -248,7 +294,7 @@ void McpClientSession::handleResponse(const json& responseJson) {
         json result = responseJson.contains("result") ? responseJson["result"] : json::object();
         json error = responseJson.contains("error") ? responseJson["error"] : json::object();
 
-        // MCP 2026-07-28 MRTR: 拦截 status/resultType: "input_required" 挂起状态
+        // MCP 2026-07-28 MRTR: 拦截 resultType/status: "input_required" 挂起状态
         bool isInputRequired = result.is_object() && 
             ((result.contains("status") && result["status"] == "input_required") ||
              (result.contains("resultType") && result["resultType"] == "input_required"));
@@ -260,21 +306,47 @@ void McpClientSession::handleResponse(const json& responseJson) {
                 mrtrHandler = m_mrtrHandler;
             }
             if (mrtrHandler) {
-                json schema = json::object();
-                if (result.contains("inputSchema")) {
-                    schema = result["inputSchema"];
-                } else if (result.contains("inputRequests")) {
-                    schema = result["inputRequests"];
+                // 规范 InputRequests map: { key: { method, params } } (SEP-2322)
+                json inputRequests = json::object();
+                if (result.contains("inputRequests") && result["inputRequests"].is_object()) {
+                    inputRequests = result["inputRequests"];
+                } else if (result.contains("inputSchema") && result["inputSchema"].is_object()) {
+                    // 兼容旧式 inputSchema 字段：包装为单个 elicitation 请求
+                    inputRequests = json{
+                        {"input", {
+                            {"method", "elicitation/create"},
+                            {"params", {
+                                {"mode", "form"},
+                                {"message", "Server requests additional input"},
+                                {"requestedSchema", result["inputSchema"]}
+                            }}
+                        }}
+                    };
                 }
+
+                // 客户端 MUST NOT 解析/修改 requestState；仅在重发时原样回显
+                std::string requestState;
+                if (result.contains("requestState") && result["requestState"].is_string()) {
+                    requestState = result["requestState"].get<std::string>();
+                }
+
                 log(LogLevel::Info, "Intercepted MRTR input_required status for request id=" + std::to_string(id));
                 std::weak_ptr<McpClientSession> weakSelf = shared_from_this();
-                mrtrHandler(schema, reqParams, [weakSelf, reqMethod, reqParams, cb](const json& userInputs) {
+                mrtrHandler(std::to_string(id), inputRequests, reqParams, requestState,
+                            [weakSelf, reqMethod, reqParams, inputRequests, requestState, cb](const json& userInputs) {
                     if (auto self = weakSelf.lock()) {
-                        self->resendMrtrRequest(reqMethod, reqParams, userInputs, cb);
+                        json inputResponses = normalizeInputResponses(inputRequests, userInputs);
+                        self->resendMrtrRequest(reqMethod, reqParams, inputResponses, requestState, cb);
                     }
                 });
                 return;
             }
+
+            // 无 MRTR handler：无法满足 input_required，回上层报错避免请求悬空
+            // （-32000..-32019 为 2026-07-28 schema 保留给实现自定义错误）
+            cb(result, {{"code", -32000},
+                        {"message", "MRTR input_required received but no MrtrInputHandler is registered"}});
+            return;
         }
 
         cb(result, error);
@@ -387,6 +459,16 @@ void McpClientSession::initialize(const std::string& clientName, const std::stri
         m_clientName = clientName;
         m_clientVersion = clientVersion;
     }
+    if (m_statelessMode) {
+        // 2026-07-28 无状态模式：initialize 握手已被规范移除（SEP-2575/2567），
+        // modern-only 服务器会对 legacy initialize 返回 UnsupportedProtocolVersionError(-32022)。
+        // 调用方应改用 server/discover + 直接 RPC；此短路避免误用 legacy 握手。
+        callback(false, json{
+            {"code", -32022},
+            {"message", "initialize is not supported in 2026-07-28 stateless mode; use server/discover instead"}
+        });
+        return;
+    }
     SessionState expected = SessionState::Uninitialized;
     if (!m_state.compare_exchange_strong(expected, SessionState::Initializing)) {
         json err = {
@@ -488,6 +570,63 @@ void McpClientSession::shutdown(std::function<void(bool success)> callback) {
             callback(true);
         }
     });
+}
+
+void McpClientSession::discoverServer(std::function<void(const McpServerDiscovery& info, const json& error)> callback) {
+    // server/discover 是 bootstrap RPC（2026-07-28），无需 initialize 握手即可发送。
+    // stateless 模式下 isReady() 恒为 true；legacy 模式下也允许先 discover 再初始化。
+    json params = json::object();
+    sendRequest("server/discover", params, [callback](const json& result, const json& error) {
+        McpServerDiscovery info;
+        if (!error.empty()) {
+            callback(info, error);
+            return;
+        }
+        if (result.contains("supportedVersions") && result["supportedVersions"].is_array()) {
+            for (const auto& v : result["supportedVersions"]) {
+                if (v.is_string()) info.supportedVersions.push_back(v.get<std::string>());
+            }
+        }
+        if (result.contains("capabilities")) info.capabilities = result["capabilities"];
+        if (result.contains("_meta") && result["_meta"].is_object() &&
+            result["_meta"].contains("io.modelcontextprotocol/serverInfo")) {
+            info.serverInfo = result["_meta"]["io.modelcontextprotocol/serverInfo"];
+        } else if (result.contains("serverInfo")) {
+            info.serverInfo = result["serverInfo"];
+        }
+        if (result.contains("instructions") && result["instructions"].is_string()) {
+            info.instructions = result["instructions"].get<std::string>();
+        }
+        if (result.contains("resultType") && result["resultType"].is_string()) {
+            info.resultType = result["resultType"].get<std::string>();
+        }
+        if (result.contains("ttlMs") && result["ttlMs"].is_number_integer()) {
+            info.ttlMs = result["ttlMs"].get<int64_t>();
+        }
+        if (result.contains("cacheScope") && result["cacheScope"].is_string()) {
+            info.cacheScope = result["cacheScope"].get<std::string>();
+        }
+        callback(info, json::object());
+    });
+}
+
+McpServerDiscovery McpClientSession::discoverServerSync(std::chrono::milliseconds timeout, json* errorOut) {
+    struct DiscoverResult {
+        McpServerDiscovery info;
+        json error;
+    };
+    auto pr = std::make_shared<std::promise<DiscoverResult>>();
+    auto fut = pr->get_future();
+    discoverServer([pr](const McpServerDiscovery& info, const json& error) {
+        pr->set_value({info, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.error;
+        return res.info;
+    }
+    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous discoverServer timed out"}};
+    return {};
 }
 
 void McpClientSession::listTools(std::function<void(const std::vector<McpTool>& tools, const json& error)> callback) {
@@ -1244,7 +1383,8 @@ void McpClientSession::injectStatelessMeta(json& params) {
             params["_meta"] = json::object();
         }
         auto& meta = params["_meta"];
-        std::string ver = m_negotiatedProtocolVersion.empty() ? "2026-07-28" : m_negotiatedProtocolVersion;
+        std::string ver = !m_overrideProtocolVersion.empty() ? m_overrideProtocolVersion
+            : (m_negotiatedProtocolVersion.empty() ? "2026-07-28" : m_negotiatedProtocolVersion);
         json clientInfoObj = {{"name", m_clientName}, {"version", m_clientVersion}};
 
         meta["protocolVersion"] = ver;
@@ -1256,16 +1396,21 @@ void McpClientSession::injectStatelessMeta(json& params) {
     }
 }
 
-void McpClientSession::resendMrtrRequest(const std::string& method, json params, const json& userInputs, ResponseCallback callback) {
+void McpClientSession::resendMrtrRequest(const std::string& method, json params,
+                                         const json& inputResponses, const std::string& requestState,
+                                         ResponseCallback callback) {
     if (!params.is_object()) {
         params = json::object();
     }
-    if (!params.contains("_meta") || !params["_meta"].is_object()) {
-        params["_meta"] = json::object();
+    // 规范 wire 格式（SEP-2322 / InputResponseRequestParams）:
+    //   inputResponses 与 requestState 位于 params 顶层（与 name/arguments/_meta 平级）
+    params["inputResponses"] = inputResponses;
+    if (!requestState.empty()) {
+        params["requestState"] = requestState;
     }
-    params["_meta"]["mrtr_input"] = userInputs;
-    params["_meta"]["inputResponses"] = userInputs;
-    log(LogLevel::Info, "Resending MRTR request method=" + method + " with mrtr_input & inputResponses");
+    log(LogLevel::Info, "Resending MRTR request method=" + method
+        + " with top-level inputResponses" + (requestState.empty() ? "" : " and requestState"));
+    // 新的 JSON-RPC id 由 sendRequest 自动分配（MUST differ from the initial request）
     sendRequest(method, params, std::move(callback));
 }
 

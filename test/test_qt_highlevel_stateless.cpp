@@ -17,10 +17,11 @@ void test_qt_highlevel_builder_and_signals() {
 
     bool signalReceived = false;
     QObject::connect(client.get(), &mcp_qt::McpQtClient::inputRequired,
-                     [&signalReceived](const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback replyCb) {
+                     [&signalReceived](const QString& reqId, const QJsonObject& inputRequests, const QString& requestState, mcp_qt::MrtrReplyCallback replyCb) {
         signalReceived = true;
         TM_ASSERT_TRUE(!reqId.isEmpty(), "request ID should not be empty");
-        TM_ASSERT_TRUE(schema.contains(QStringLiteral("properties")), "inputSchema should contain properties");
+        // 规范语义：requestState 原样透传，客户端只负责回显
+        Q_UNUSED(requestState);
         replyCb(QJsonObject{{QStringLiteral("token"), QStringLiteral("abc-123")}});
     });
 

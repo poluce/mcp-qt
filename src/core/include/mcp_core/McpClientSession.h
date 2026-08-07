@@ -35,6 +35,27 @@ enum class LogLevel {
 using LogCallback = std::function<void(LogLevel level, const std::string& message)>;
 
 /**
+ * @brief Result of server/discover (MCP 2026-07-28, SEP-2575).
+ *
+ * Servers MUST implement server/discover. The RPC returns supportedVersions,
+ * capabilities, _meta."io.modelcontextprotocol/serverInfo" and optional
+ * instructions / ttlMs / cacheScope / resultType.
+ */
+struct McpServerDiscovery {
+    std::vector<std::string> supportedVersions;
+    json capabilities;
+    json serverInfo;   // _meta."io.modelcontextprotocol/serverInfo"
+    std::string instructions;
+    std::string resultType;
+    int64_t ttlMs{-1};
+    std::string cacheScope;
+
+    bool empty() const {
+        return supportedVersions.empty() && serverInfo.empty() && instructions.empty();
+    }
+};
+
+/**
  * @brief Manages a Model Context Protocol Client Session.
  * 
  * Tracks pending requests, routes incoming server responses/notifications, and provides
@@ -78,10 +99,30 @@ public:
     using RootsProvider = std::function<void(std::function<void(const json& result, const json& error)> callback)>;
 
     /**
-     * @brief Handler for MRTR (Multi Round-Trip Requests) when server responds with input_required status.
-     *        Calls callback with user inputs json to resume the stateless request.
+     * @brief Handler for MRTR (Multi Round-Trip Requests) when server responds with
+     *        `resultType: "input_required"` (MCP 2026-07-28, SEP-2322).
+     *
+     * Wire model (official 2026-07-28 schema):
+     *   InputRequiredResult = { resultType: "input_required",
+     *                           inputRequests?: { key: {method, params} },
+     *                           requestState?: opaque-string }
+     *   Retry request params = { ...original, inputResponses: { key: result }, requestState?: <echoed> }
+     *
+     * The handler is invoked with:
+     *   - requestId:   JSON-RPC id of the pending request (new id is minted automatically on retry).
+     *   - inputRequests: the server's InputRequests map (key -> {method, params}), may be empty.
+     *   - requestParams: the original request params (must be preserved when retrying).
+     *   - requestState:  opaque string the client MUST echo back verbatim on retry; may be empty.
+     *   - callback:      MUST be called with the client's InputResponses map (key -> result).
+     *                    For elicitation form requests the library auto-wraps flat {field: value}
+     *                    into {action:"accept", content:{...}} when a single request is present.
      */
-    using MrtrInputHandler = std::function<void(const json& inputSchema, const json& requestParams, std::function<void(const json& userInputs)> callback)>;
+    using MrtrInputHandler = std::function<void(
+        const std::string& requestId,
+        const json& inputRequests,
+        const json& requestParams,
+        const std::string& requestState,
+        std::function<void(const json& inputResponses)> callback)>;
 
     struct PendingRequest {
         std::string method;
@@ -163,6 +204,18 @@ public:
      * @brief Safely shutdown the session.
      */
     void shutdown(std::function<void(bool success)> callback);
+
+    /**
+     * @brief Query server/discover (MCP 2026-07-28).
+     *        Servers MUST implement this RPC; clients should call it before other
+     *        RPCs when operating without the legacy initialize handshake.
+     */
+    void discoverServer(std::function<void(const McpServerDiscovery& info, const json& error)> callback);
+
+    /**
+     * @brief Synchronous variant of discoverServer().
+     */
+    McpServerDiscovery discoverServerSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(10000), json* errorOut = nullptr);
 
     /**
      * @brief List the tools exposed by the MCP server.
@@ -421,7 +474,8 @@ private:
     void handleResponse(const json& responseJson);
     void handleNotification(const json& notificationJson);
     void handleRequestFromServer(const json& requestJson);
-    void resendMrtrRequest(const std::string& method, json params, const json& userInputs, ResponseCallback callback);
+    void resendMrtrRequest(const std::string& method, json params, const json& inputResponses,
+                           const std::string& requestState, ResponseCallback callback);
     void injectStatelessMeta(json& params);
 
     void log(LogLevel level, const std::string& message);

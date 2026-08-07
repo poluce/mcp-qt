@@ -304,7 +304,15 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
 // Builder Implementation
 // ============================================================================
 McpQtClientBuilder& McpQtClientBuilder::setTransportHttp(const QString& url) { m_transportType = 1; m_url_or_cmd = url; return *this; }
-McpQtClientBuilder& McpQtClientBuilder::setTransportStatelessHttp(const QString& url) { m_transportType = 3; m_url_or_cmd = url; return *this; }
+McpQtClientBuilder& McpQtClientBuilder::setTransportStatelessHttp(const QString& url) {
+    m_transportType = 3;
+    m_url_or_cmd = url;
+    // 2026-07-28 无状态 HTTP 传输语义上即对应无状态模式：自动开启，避免仅配置
+    // stateless_http 却走 legacy initialize 握手（modern-only 服务器返回 -32022 / -32020 HeaderMismatch）。
+    // 调用方仍可在其后显式 setStatelessMode(false) 覆盖。
+    m_statelessMode = true;
+    return *this;
+}
 McpQtClientBuilder& McpQtClientBuilder::setTransportStdio(const QString& command, const QStringList& args) { m_transportType = 2; m_url_or_cmd = command; m_args = args; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setEnvironment(const QMap<QString, QString>& env) { m_env = env; return *this; }
 McpQtClientBuilder& McpQtClientBuilder::setHttpHeaders(const QMap<QString, QString>& headers) { m_httpHeaders = headers; return *this; }
@@ -574,6 +582,24 @@ void McpQtClient::setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> t) {
         }
     });
 
+    // MCP 2026-07-28 MRTR: 将 session 层的 input_required 挂起桥接为 inputRequired 信号。
+    // requestState 原样透传（客户端 MUST NOT 解析/修改），reply 时以 InputResponses 结构回填。
+    m_session->setMrtrHandler([this](const std::string& requestId,
+                                     const nlohmann::json& inputRequests,
+                                     const nlohmann::json& requestParams,
+                                     const std::string& requestState,
+                                     std::function<void(const nlohmann::json&)> replyCb) {
+        QString reqId = QString::fromStdString(requestId);
+        QJsonObject qRequests = _qj(inputRequests);
+        QString qState = QString::fromStdString(requestState);
+        QMetaObject::invokeMethod(this, [this, reqId, qRequests, qState, replyCb]() {
+            emit inputRequired(reqId, qRequests, qState,
+                [replyCb](const QJsonObject& userResponse) {
+                    replyCb(_nl(userResponse));
+                });
+        }, Qt::QueuedConnection);
+    });
+
     // 监听 session 的 onClose 以响应连接断开，不覆盖底层的 transport onClose
     // 使用 QueuedConnection 确保 disconnected 和自愈状态机安全运行在主线程，防范 QTimer 跨线程归属警告
     m_session->setOnClose([this]() {
@@ -612,6 +638,16 @@ void McpQtClient::setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> t) {
     m_pendingCapabilities.clear();
 }
 bool McpQtClient::doInitializeAndWait(const QString& name,const QString& ver,int to, QString* err){
+    if (isStatelessMode()) {
+        // 2026-07-28 无状态模式：legacy initialize 握手已移除（SEP-2575/2567）。
+        // 做一次 server/discover 获取信息（客户端 OPTIONAL，失败不阻断），随后直接就绪。
+        runSyncWithTimeout([this](auto quit) {
+            m_session->discoverServer([quit](const mcp::McpServerDiscovery&, const nlohmann::json&) {
+                quit();
+            });
+        }, to);
+        m_initialized=true; emit connected(); return true;
+    }
     auto initOkPtr = std::make_shared<bool>(false);
     bool ok = runSyncWithTimeout([initOkPtr, name, ver, this](auto quit) {
         m_session->initialize(name.toStdString(), ver.toStdString(), [initOkPtr, quit](bool success, const nlohmann::json&) {
@@ -647,6 +683,44 @@ QJsonObject McpQtClient::serverInfo()const{return m_session?_qj(m_session->getSe
 QJsonObject McpQtClient::serverCapabilities()const{return m_session?_qj(m_session->getServerCapabilities()):QJsonObject{};}
 QString McpQtClient::negotiatedProtocolVersion()const{return m_session?QString::fromStdString(m_session->getNegotiatedProtocolVersion()):QString{};}
 QString McpQtClient::instructions()const{return m_session?QString::fromStdString(m_session->getInstructions()):QString{};}
+
+// ========== Server Discover (2026-07-28, SEP-2575) ==========
+static McpQtClient::DiscoverInfo _convertDiscover(const mcp::McpServerDiscovery& d) {
+    McpQtClient::DiscoverInfo info;
+    for (const auto& v : d.supportedVersions) info.supportedVersions << QString::fromStdString(v);
+    info.capabilities = _qj(d.capabilities);
+    info.serverInfo = _qj(d.serverInfo);
+    info.instructions = QString::fromStdString(d.instructions);
+    info.resultType = QString::fromStdString(d.resultType);
+    info.ttlMs = d.ttlMs;
+    info.cacheScope = QString::fromStdString(d.cacheScope);
+    return info;
+}
+
+McpQtClient::DiscoverInfo McpQtClient::discoverServer(int to) {
+    DiscoverInfo info;
+    if (!m_session) return info;
+    auto result = std::make_shared<mcp::McpServerDiscovery>();
+    runSyncWithTimeout([&](const std::function<void()>& quit) {
+        m_session->discoverServer([result, quit](const mcp::McpServerDiscovery& d, const nlohmann::json&) {
+            *result = d;
+            quit();
+        });
+    }, to);
+    return _convertDiscover(*result);
+}
+
+void McpQtClient::discoverServerAsync(std::function<void(const DiscoverInfo&, const QString&)> callback) {
+    if (!m_session) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { DiscoverInfo e; callback(e, QStringLiteral("No session")); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->discoverServer([this, callback](const mcp::McpServerDiscovery& d, const nlohmann::json& error) {
+        if (!callback) return;
+        QString err = error.empty() ? QString{} : QString::fromStdString(error.dump());
+        callback(_convertDiscover(d), err);
+    });
+}
 
 bool McpQtClient::hasToolsCapability() const { return serverCapabilities().contains("tools"); }
 bool McpQtClient::hasPromptsCapability() const { return serverCapabilities().contains("prompts"); }
@@ -2030,6 +2104,19 @@ void McpQtClient::executeReconnectAttempt() {
                 t->setEnvironment(envMap);
             }
             newTransport = t;
+        } else if (m_transportType == 3) {
+            // 2026-07-28 无状态 HTTP：重连时重建 QtStatelessHttpTransport，
+            // 并恢复 custom headers / proxy（与 buildAndConnectAsync type=3 分支一致）。
+            auto t = std::make_shared<mcp_qt::QtStatelessHttpTransport>(m_url_or_cmd);
+            QMap<QByteArray, QByteArray> headers;
+            for (auto it = m_httpHeaders.constBegin(); it != m_httpHeaders.constEnd(); ++it) {
+                headers.insert(it.key().toUtf8(), it.value().toUtf8());
+            }
+            t->setCustomHeaders(headers);
+            if (m_proxy) {
+                t->setProxy(*m_proxy);
+            }
+            newTransport = t;
         }
     }
 
@@ -2447,7 +2534,38 @@ void McpQtClient::connectToTransportAsync(std::shared_ptr<mcp::IMcpTransport> t,
         }, Qt::QueuedConnection);
         return;
     }
+    if (isStatelessMode()) {
+        // 2026-07-28 无状态模式：legacy initialize/initialized 握手已被规范移除（SEP-2575/2567），
+        // 不再发送 initialize RPC（modern-only 服务器会对 legacy initialize 返回 -32022）。
+        // 通过 server/discover 获取服务器信息（客户端 OPTIONAL，失败不阻断连接），然后直接就绪。
+        doDiscoverAsync();
+        return;
+    }
     doInitializeAsync(name, ver);
+}
+
+void McpQtClient::doDiscoverAsync() {
+    m_session->discoverServer([this](const mcp::McpServerDiscovery& info, const nlohmann::json& error) {
+        if (!error.empty() && !error.is_null()) {
+            qWarning().noquote() << "[McpQtClient] server/discover failed (non-fatal):"
+                                 << QString::fromStdString(error.dump());
+        } else if (!info.supportedVersions.empty()) {
+            qDebug().noquote() << "[McpQtClient] server/discover ok, supported versions:"
+                               << QString::fromStdString([&info]() {
+                                   std::string s;
+                                   for (const auto& v : info.supportedVersions) {
+                                       if (!s.empty()) s += ", ";
+                                       s += v;
+                                   }
+                                   return s;
+                               }());
+        }
+        // discover 仅为信息获取；无状态连接无需握手即已就绪。
+        QMetaObject::invokeMethod(this, [this]() {
+            m_initialized = true;
+            emit connected();
+        }, Qt::QueuedConnection);
+    });
 }
 
 void McpQtClient::doInitializeAsync(const QString& name, const QString& ver) {

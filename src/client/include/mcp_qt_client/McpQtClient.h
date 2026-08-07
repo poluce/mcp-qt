@@ -208,6 +208,28 @@ public:
     bool isStatelessMode() const;
     void setProtocolVersion(const QString& version);
 
+    // ========== Server Discover（2026-07-28, SEP-2575）==========
+
+    /// server/discover 结果
+    struct DiscoverInfo {
+        QStringList supportedVersions;
+        QJsonObject capabilities;
+        QJsonObject serverInfo;
+        QString instructions;
+        QString resultType;
+        qint64 ttlMs{-1};
+        QString cacheScope;
+        bool empty() const {
+            return supportedVersions.isEmpty() && serverInfo.isEmpty() && instructions.isEmpty();
+        }
+    };
+
+    /// 同步执行 server/discover（无状态模式下推荐在其它 RPC 前调用）
+    DiscoverInfo discoverServer(int timeoutMs = 10000);
+
+    /// 异步执行 server/discover
+    void discoverServerAsync(std::function<void(const DiscoverInfo& info, const QString& error)> callback);
+
     // 便捷能力检测
     bool hasToolsCapability() const;
     bool hasPromptsCapability() const;
@@ -453,8 +475,12 @@ signals:
     void disconnected();
     void errorOccurred(const mcp_qt::McpError& error);
     
-    /// MCP 2026-07-28 MRTR: 服务端在无状态模式下触发 input_required 状态，请求用户补全参数
-    void inputRequired(const QString& requestId, const QJsonObject& inputSchema, mcp_qt::MrtrReplyCallback replyCallback);
+    /// MCP 2026-07-28 MRTR: 服务端返回 input_required，请求客户端补全输入后再重试原请求。
+    /// requestId: 待补全请求的 JSON-RPC id；inputRequests: 规范 InputRequests map
+    /// （key -> {method, params}）；requestState: 服务端 opaque 状态，重试时必须原样回显。
+    /// 调用 replyCallback 时传入 InputResponses map（key -> 对应结果），库会自动完成重试。
+    void inputRequired(const QString& requestId, const QJsonObject& inputRequests,
+                       const QString& requestState, mcp_qt::MrtrReplyCallback replyCallback);
 
     /// 收到服务端的任意通知
     void notificationReceived(const QString& method, const QJsonObject& params);
@@ -480,6 +506,7 @@ private:
 
     
     void doInitializeAsync(const QString& clientName, const QString& clientVersion);
+    void doDiscoverAsync();
     void setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> transport);
 
     bool doInitializeAndWait(const QString& clientName, const QString& clientVersion, int timeoutMs, QString* errorString = nullptr);

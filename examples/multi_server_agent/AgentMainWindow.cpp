@@ -130,9 +130,27 @@ AgentMainWindow::AgentMainWindow(QWidget* parent)
         appendLogHtml(QString("<div style='color:red;'>[Error] %1: %2</div>").arg(name, err.message));
     });
 
-    connect(m_host, &mcp_qt::McpHost::inputRequired, this, [this](const QString& srvName, const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback cb) {
+    connect(m_host, &mcp_qt::McpHost::inputRequired, this, [this](const QString& srvName, const QString& reqId, const QJsonObject& inputRequests, const QString& requestState, mcp_qt::MrtrReplyCallback cb) {
         appendLogHtml(QString("<div style='color:#e67e22;'><b>[MRTR 2026-07-28 多轮交互]</b> 节点 %1 请求补充输入 (ReqID: %2)</div>").arg(srvName, reqId));
-        cb(QJsonObject{{QStringLiteral("password"), QStringLiteral("demo-secret")}});
+        // 演示：遍历规范 InputRequests map，构造按 key 组织的 InputResponses；
+        // requestState 由库在重发时原样回显（客户端 MUST NOT 解析/修改）
+        QJsonObject responses;
+        const QJsonObject requests = inputRequests;
+        for (auto it = requests.begin(); it != requests.end(); ++it) {
+            const QJsonObject req = it.value().toObject();
+            if (req.value(QStringLiteral("method")).toString() == QStringLiteral("elicitation/create")) {
+                const QJsonObject params = req.value(QStringLiteral("params")).toObject();
+                const QJsonObject schema = params.value(QStringLiteral("requestedSchema")).toObject();
+                QJsonObject content;
+                const QJsonObject props = schema.value(QStringLiteral("properties")).toObject();
+                for (auto p = props.begin(); p != props.end(); ++p) {
+                    content.insert(p.key(), QStringLiteral("demo-secret"));
+                }
+                responses.insert(it.key(), QJsonObject{{QStringLiteral("action"), QStringLiteral("accept")}, {QStringLiteral("content"), content}});
+            }
+        }
+        Q_UNUSED(requestState);
+        cb(responses);
     });
 }
 

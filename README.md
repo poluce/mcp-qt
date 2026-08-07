@@ -85,11 +85,25 @@ auto statelessClient = mcp_qt::McpQtClientBuilder()
     .buildAndConnectAsync();
 
 // 🌟 MCP 2026-07-28 MRTR 多轮次交互信号监听（用于 Qt GUI / QML 弹窗交互）
+// inputRequests: 规范 InputRequests map (key -> {method, params})；
+// requestState: 服务端 opaque 状态，库会在重发时自动原样回显。
+// 回传的 InputResponses 需按 key 组织；单请求 elicitation 也可直接回扁平表单数据。
 QObject::connect(statelessClient.get(), &mcp_qt::McpQtClient::inputRequired,
-                 [](const QString& reqId, const QJsonObject& schema, mcp_qt::MrtrReplyCallback replyCb) {
-    qDebug() << "Server requested additional input for request:" << reqId << "Schema:" << schema;
-    // 用户弹窗确认后回传补充输入
-    replyCb(QJsonObject{{"password", "secret123"}});
+                 [](const QString& reqId, const QJsonObject& inputRequests, const QString& requestState,
+                    mcp_qt::MrtrReplyCallback replyCb) {
+    qDebug() << "Server requested additional input for request:" << reqId << "InputRequests:" << inputRequests;
+    QJsonObject inputResponses;
+    const QJsonObject requests = inputRequests;
+    for (auto it = requests.begin(); it != requests.end(); ++it) {
+        const QJsonObject req = it.value().toObject();
+        if (req.value("method").toString() == "elicitation/create") {
+            QJsonObject content;
+            content["password"] = "secret123";
+            inputResponses[it.key()] = QJsonObject{{"action", "accept"}, {"content", content}};
+        }
+    }
+    Q_UNUSED(requestState);
+    replyCb(inputResponses);
 });
 
 // 双向能力（处理来自服务端的请求）

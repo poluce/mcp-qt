@@ -19,15 +19,33 @@ int runStateless20260728(const RunnerConfig& config) {
     std::cout << "[2026-07-28 Verified] Negotiated Protocol Version: " << session->getNegotiatedProtocolVersion() << std::endl;
     std::cout << "[2026-07-28 Verified] Is Stateless Mode: " << (session->isStatelessMode() ? "TRUE" : "FALSE") << std::endl;
 
-    // 注册 MRTR 处理回调
-    session->setMrtrHandler([](const nlohmann::json& schema, const nlohmann::json& requestParams, std::function<void(const nlohmann::json& userInputs)> replyCb) {
-        nlohmann::json response = nlohmann::json::object();
-        if (schema.contains("properties")) {
-            for (auto it = schema["properties"].begin(); it != schema["properties"].end(); ++it) {
-                response[it.key()] = "conformance-value";
+    // 注册 MRTR 处理回调（2026-07-28 规范 InputRequests map + requestState）
+    session->setMrtrHandler([](const std::string& requestId,
+                               const nlohmann::json& inputRequests,
+                               const nlohmann::json& requestParams,
+                               const std::string& requestState,
+                               std::function<void(const nlohmann::json&)> replyCb) {
+        nlohmann::json inputResponses = nlohmann::json::object();
+        for (auto it = inputRequests.begin(); it != inputRequests.end(); ++it) {
+            const std::string& key = it.key();
+            const nlohmann::json& req = it.value();
+            std::string method = req.contains("method") && req["method"].is_string()
+                                     ? req["method"].get<std::string>()
+                                     : std::string();
+            if (method == "elicitation/create" &&
+                req.contains("params") && req["params"].contains("requestedSchema") &&
+                req["params"]["requestedSchema"].contains("properties")) {
+                nlohmann::json content = nlohmann::json::object();
+                for (auto p = req["params"]["requestedSchema"]["properties"].begin();
+                     p != req["params"]["requestedSchema"]["properties"].end(); ++p) {
+                    content[p.key()] = "conformance-value";
+                }
+                inputResponses[key] = {{"action", "accept"}, {"content", content}};
+            } else {
+                inputResponses[key] = {{"content", nlohmann::json::array()}};
             }
         }
-        replyCb(response);
+        replyCb(inputResponses);
     });
 
     // 免 initializeSync 握手直接调用 listTools

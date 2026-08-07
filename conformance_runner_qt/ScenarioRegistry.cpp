@@ -14,9 +14,11 @@ int runElicitationDefaults(const RunnerConfig&);
 int runAuthFlow(const RunnerConfig&);
 int runClientCredentialsFlow(const RunnerConfig&);
 int runStateless20260728(const RunnerConfig&);
+int runStateless20260728Http(const RunnerConfig&);
 
 static const std::map<std::string, ScenarioHandler> kHandlers = {
     {"stateless-2026-07-28", &runStateless20260728},
+    {"stateless-2026-07-28-http", &runStateless20260728Http},
     {"initialize", &runInitialize},
     {"tools_call", &runToolsCall},
     {"sse-retry", &runSseRetry},

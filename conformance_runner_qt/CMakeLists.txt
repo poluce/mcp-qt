@@ -5,6 +5,7 @@ add_executable(mcp_client_conformance_qt
     ScenarioContext.cpp
     ScenarioHandlersAuthQt.cpp
     ScenarioHandlersStateless.cpp
+    ScenarioHandlersStatelessHttp.cpp
     ConsoleStdioTransport.cpp
     main_qt.cpp
 )
@@ -14,6 +15,7 @@ target_include_directories(mcp_client_conformance_qt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/client/include
     ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/transport/include
 )
 
 target_compile_options(mcp_client_conformance_qt PRIVATE

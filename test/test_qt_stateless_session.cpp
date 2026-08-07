@@ -70,11 +70,20 @@ void test_qt_stateless_session_mrtr_loop() {
     session->setStatelessMode(true);
 
     bool mrtrTriggered = false;
-    session->setMrtrHandler([&mrtrTriggered](const nlohmann::json& schema, const nlohmann::json& requestParams, std::function<void(const nlohmann::json& userInputs)> replyCb) {
+    std::string capturedRequestState;
+    session->setMrtrHandler([&mrtrTriggered, &capturedRequestState](
+        const std::string& requestId,
+        const nlohmann::json& inputRequests,
+        const nlohmann::json& requestParams,
+        const std::string& requestState,
+        std::function<void(const nlohmann::json&)> replyCb) {
         mrtrTriggered = true;
-        TM_ASSERT_TRUE(schema.contains("properties"), "schema should contain properties");
-        TM_ASSERT_TRUE(schema["properties"].contains("password"), "schema should require password");
-        // 回传补充输入的密码
+        capturedRequestState = requestState;
+        TM_ASSERT_TRUE(inputRequests.is_object() && inputRequests.size() == 1, "inputRequests should be a map");
+        TM_ASSERT_TRUE(inputRequests.contains("github_login"), "inputRequests should contain github_login key");
+        TM_ASSERT_TRUE(inputRequests["github_login"]["method"] == "elicitation/create", "request method should be elicitation/create");
+        TM_ASSERT_TRUE(inputRequests["github_login"]["params"]["requestedSchema"]["properties"].contains("password"), "requested schema should require password");
+        // 扁平表单数据，由库自动包装为 ElicitResult
         replyCb({{"password", "secret123"}});
     });
 
@@ -91,31 +100,52 @@ void test_qt_stateless_session_mrtr_loop() {
     auto firstReq = nlohmann::json::parse(mockTransport->sentMessages[0]);
     int64_t reqId1 = firstReq["id"].get<int64_t>();
 
-    // 模拟服务端响应 input_required
+    // 模拟符合 2026-07-28 规范的 InputRequiredResult（SEP-2322）
     nlohmann::json inputRequiredResp = {
         {"jsonrpc", "2.0"},
         {"id", reqId1},
         {"result", {
-            {"status", "input_required"},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"password", {{"type", "string"}}}
+            {"resultType", "input_required"},
+            {"inputRequests", {
+                {"github_login", {
+                    {"method", "elicitation/create"},
+                    {"params", {
+                        {"mode", "form"},
+                        {"message", "Please provide your GitHub username"},
+                        {"requestedSchema", {
+                            {"type", "object"},
+                            {"properties", {{"password", {{"type", "string"}}}}},
+                            {"required", {"password"}}
+                        }}
+                    }}
                 }}
-            }}
+            }},
+            {"requestState", "AEAD-protected-blob"}
         }}
     };
     mockTransport->onMsgCb(inputRequiredResp.dump());
 
-    // 验证 MRTR 处理器被触发，并且自动向 Transport 发出了第二个重试 Request 报文
+    // 验证 MRTR 处理器被触发，并自动发出第二个重试 Request 报文
     TM_ASSERT_TRUE(mrtrTriggered, "MRTR handler should be triggered");
+    TM_ASSERT_TRUE(capturedRequestState == "AEAD-protected-blob", "requestState should be passed through verbatim");
     TM_ASSERT_TRUE(mockTransport->sentMessages.size() == 2, "second request should be sent automatically after user input");
 
     auto secondReq = nlohmann::json::parse(mockTransport->sentMessages[1]);
     TM_ASSERT_TRUE(secondReq["method"] == "tools/call", "second request method should still be tools/call");
-    TM_ASSERT_TRUE(secondReq["params"]["_meta"].contains("mrtr_input"), "second request params._meta should contain mrtr_input");
-    TM_ASSERT_TRUE(secondReq["params"]["_meta"]["mrtr_input"]["password"] == "secret123", "mrtr_input password should be secret123");
-    TM_ASSERT_TRUE(secondReq["params"]["_meta"].contains("inputResponses"), "second request params._meta should contain inputResponses");
+
+    // 规范要求：重试的 JSON-RPC id MUST 与首轮不同
+    TM_ASSERT_TRUE(secondReq["id"].get<int64_t>() != reqId1, "retry request MUST use a new JSON-RPC id");
+
+    // inputResponses 位于 params 顶层（与 name/arguments/_meta 平级）
+    TM_ASSERT_TRUE(secondReq["params"].contains("inputResponses"), "params should contain top-level inputResponses");
+    TM_ASSERT_TRUE(secondReq["params"]["inputResponses"]["github_login"]["action"] == "accept", "elicitation result should be accepted");
+    TM_ASSERT_TRUE(secondReq["params"]["inputResponses"]["github_login"]["content"]["password"] == "secret123", "form content should be echoed");
+
+    // requestState 必须原样回显（客户端 MUST NOT 解析/修改）
+    TM_ASSERT_TRUE(secondReq["params"]["requestState"] == "AEAD-protected-blob", "requestState must be echoed verbatim");
+
+    // _meta 仍在 params 顶层（无状态自描述）
+    TM_ASSERT_TRUE(secondReq["params"].contains("_meta"), "params should still contain _meta");
 
     int64_t reqId2 = secondReq["id"].get<int64_t>();
 
@@ -124,18 +154,18 @@ void test_qt_stateless_session_mrtr_loop() {
         {"jsonrpc", "2.0"},
         {"id", reqId2},
         {"result", {
-            {"status", "success"},
+            {"resultType", "complete"},
             {"content", {{{"type", "text"}, {"text", "Authenticated successfully"}}}}
         }}
     };
     mockTransport->onMsgCb(successResp.dump());
 
     TM_ASSERT_TRUE(toolCompleted, "original tool callback should be completed after MRTR loop");
-    TM_ASSERT_TRUE(finalContent.contains("status") && finalContent["status"] == "success", "final result status should be success");
+    TM_ASSERT_TRUE(finalContent.contains("content"), "final result should carry content");
 }
 
 void test_qt_stateless_session_multi_round_mrtr_loop() {
-    // 边界测试 2：连续 3 轮交互与 resultType / inputRequests 官方别名解析
+    // 边界测试 2：连续 3 轮交互，逐轮回显不同的 requestState
     auto mockTransport = std::make_shared<StatelessMockTransport>();
     auto session = std::make_shared<mcp::McpClientSession>(mockTransport);
     session->init();
@@ -143,15 +173,20 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
     session->setStatelessMode(true);
 
     int mrtrCallCount = 0;
-    session->setMrtrHandler([&mrtrCallCount](const nlohmann::json& schema, const nlohmann::json& requestParams, std::function<void(const nlohmann::json& userInputs)> replyCb) {
+    std::vector<std::string> capturedStates;
+    session->setMrtrHandler([&mrtrCallCount, &capturedStates](
+        const std::string& requestId,
+        const nlohmann::json& inputRequests,
+        const nlohmann::json& requestParams,
+        const std::string& requestState,
+        std::function<void(const nlohmann::json&)> replyCb) {
         mrtrCallCount++;
+        capturedStates.push_back(requestState);
         if (mrtrCallCount == 1) {
-            // 第一轮补充密码
-            TM_ASSERT_TRUE(schema["properties"].contains("password"), "round 1 asks for password");
+            TM_ASSERT_TRUE(inputRequests.contains("step1"), "round 1 asks for step1");
             replyCb({{"password", "myPass123"}});
         } else if (mrtrCallCount == 2) {
-            // 第二轮补充 MFA 二次验证码
-            TM_ASSERT_TRUE(schema["properties"].contains("mfaCode"), "round 2 asks for mfaCode");
+            TM_ASSERT_TRUE(inputRequests.contains("step2"), "round 2 asks for step2");
             replyCb({{"mfaCode", "888999"}});
         }
     });
@@ -163,7 +198,7 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
         }
     });
 
-    // 第一轮服务端响应: 使用规范别名 resultType: "input_required" 和 inputRequests 字段
+    // 第一轮：规范 inputRequests + requestState = "state-1"
     auto req1 = nlohmann::json::parse(mockTransport->sentMessages[0]);
     nlohmann::json resp1 = {
         {"jsonrpc", "2.0"},
@@ -171,9 +206,12 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
         {"result", {
             {"resultType", "input_required"},
             {"inputRequests", {
-                {"type", "object"},
-                {"properties", {{"password", {{"type", "string"}}}}}
-            }}
+                {"step1", {
+                    {"method", "elicitation/create"},
+                    {"params", {{"mode", "form"}, {"message", "password?"}, {"requestedSchema", {{"type", "object"}, {"properties", {{"password", {{"type", "string"}}}}}}}}}
+                }}
+            }},
+            {"requestState", "state-1"}
         }}
     };
     mockTransport->onMsgCb(resp1.dump());
@@ -181,17 +219,23 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
     TM_ASSERT_TRUE(mrtrCallCount == 1, "round 1 MRTR triggered");
     TM_ASSERT_TRUE(mockTransport->sentMessages.size() == 2, "second request sent");
 
-    // 第二轮服务端响应: 发现还需要 MFA 验证码
     auto req2 = nlohmann::json::parse(mockTransport->sentMessages[1]);
+    TM_ASSERT_TRUE(req2["params"]["requestState"] == "state-1", "round 1 requestState echoed verbatim");
+    TM_ASSERT_TRUE(req2["params"]["inputResponses"]["step1"]["action"] == "accept", "round 1 response keyed by step1");
+
+    // 第二轮：requestState 变为 "state-2"
     nlohmann::json resp2 = {
         {"jsonrpc", "2.0"},
         {"id", req2["id"]},
         {"result", {
             {"resultType", "input_required"},
             {"inputRequests", {
-                {"type", "object"},
-                {"properties", {{"mfaCode", {{"type", "string"}}}}}
-            }}
+                {"step2", {
+                    {"method", "elicitation/create"},
+                    {"params", {{"mode", "form"}, {"message", "mfa?"}, {"requestedSchema", {{"type", "object"}, {"properties", {{"mfaCode", {{"type", "string"}}}}}}}}}
+                }}
+            }},
+            {"requestState", "state-2"}
         }}
     };
     mockTransport->onMsgCb(resp2.dump());
@@ -199,14 +243,18 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
     TM_ASSERT_TRUE(mrtrCallCount == 2, "round 2 MRTR triggered");
     TM_ASSERT_TRUE(mockTransport->sentMessages.size() == 3, "third request sent");
 
-    // 第三轮服务端响应: 成功完成操作
     auto req3 = nlohmann::json::parse(mockTransport->sentMessages[2]);
+    TM_ASSERT_TRUE(req3["params"]["requestState"] == "state-2", "round 2 requestState echoed verbatim");
+    TM_ASSERT_TRUE(req3["params"]["inputResponses"]["step2"]["content"]["mfaCode"] == "888999", "round 2 mfa echoed");
+
+    // 第三轮：成功完成
     nlohmann::json resp3 = {
         {"jsonrpc", "2.0"},
         {"id", req3["id"]},
-        {"result", {{"status", "completed"}}}
+        {"result", {{"resultType", "complete"}, {"status", "completed"}}}
     };
     mockTransport->onMsgCb(resp3.dump());
 
     TM_ASSERT_TRUE(toolCompleted, "tool completed after multi-round MRTR loop");
+    TM_ASSERT_TRUE(capturedStates.size() == 2 && capturedStates[0] == "state-1" && capturedStates[1] == "state-2", "per-round requestState observed");
 }
