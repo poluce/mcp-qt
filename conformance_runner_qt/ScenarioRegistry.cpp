@@ -35,7 +35,7 @@ static const std::map<std::string, ScenarioHandler> kHandlers = {
     {"http-invalid-tool-headers", &runHttpInvalidToolHeaders},
     {"json-schema-ref-no-deref", &runJsonSchemaRefNoDeref},
     {"initialize", &runInitialize},
-    {"tools_call", &runToolsCall},
+    // tools_call 由 runToolsCall2026 按 spec-version 内部转发（2026-07-28 stateless / 旧版 legacy）
     {"sse-retry", &runSseRetry},
     {"elicitation-sep1034-client-defaults", &runElicitationDefaults},
     {"auth/basic-cimd", &runAuthFlow},

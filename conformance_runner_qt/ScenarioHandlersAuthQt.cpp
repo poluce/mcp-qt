@@ -150,10 +150,14 @@ static int _raQt(const RunnerConfig& c, bool ct) {
     auto t = std::make_shared<mcp_qt::QtStatelessHttpTransport>(QString::fromStdString(c.serverUrl));
     if (!c.protocolVersion.empty()) {
         t->setProtocolVersion(c.protocolVersion);
+    } else {
+        // 旧 conformance 框架（0.1.x）不传 spec-version：按 2025-11-25 legacy 处理
+        t->setProtocolVersion("2025-11-25");
     }
 
-    // 2026-07-28 无状态模式：跳过 legacy initialize 握手（SEP-2575/2567）
-    if (c.protocolVersion.empty() || c.protocolVersion == "2026-07-28") {
+    // 2026-07-28 无状态模式：跳过 legacy initialize 握手（SEP-2575/2567）。
+    // 仅当框架显式指定 spec-version=2026-07-28 时启用；为空（旧框架）或其它版本走 legacy。
+    if (c.protocolVersion == "2026-07-28") {
         cl->setStatelessMode(true);
     }
 
