@@ -58,6 +58,13 @@ struct McpResult {
     QList<McpContent> contents;
 };
 
+/// MCP 2026-07-28 CacheableResult 缓存提示（ttlMs/cacheScope），由 list/read 结果解析。
+struct McpCacheHint {
+    qint64 ttlMs{-1};
+    QString cacheScope;
+    bool empty() const { return ttlMs < 0 && cacheScope.isEmpty(); }
+};
+
 struct McpBatchCallRequest {
     QString name;
     QJsonObject arguments;
@@ -247,6 +254,10 @@ public:
     std::vector<McpQtTool> listTools(const QString& cursor, QString* nextCursor = nullptr, int timeoutMs = 10000);
     std::vector<McpQtTool> fetchAllTools(int timeoutMs = 10000);
 
+    /// 带 CacheableResult 缓存提示（2026-07-28 ttlMs/cacheScope）的工具列表
+    std::vector<McpQtTool> listTools(McpCacheHint* hint, int timeoutMs = 10000);
+    std::vector<McpQtTool> listTools(const QString& cursor, QString* nextCursor, McpCacheHint* hint, int timeoutMs = 10000);
+
     /// 获取当前缓存在客户端中的所有工具列表（不触发网络请求）
     std::vector<McpQtTool> cachedTools() const;
 
@@ -334,6 +345,10 @@ public:
     QJsonObject listResources(const QString& cursor, QString* nextCursor = nullptr, int timeoutMs = 10000);
     QJsonObject fetchAllResources(int timeoutMs = 10000);
 
+    /// 带 CacheableResult 缓存提示（2026-07-28 ttlMs/cacheScope）的资源列表
+    QJsonObject listResources(McpCacheHint* hint, int timeoutMs = 10000);
+    QJsonObject listResources(const QString& cursor, QString* nextCursor, McpCacheHint* hint, int timeoutMs = 10000);
+
     /// 异步获取资源列表
     void listResourcesAsync(const QString& cursor, std::function<void(const QJsonObject& result, const QString& nextCursor, const QString& error)> callback);
 
@@ -378,6 +393,10 @@ public:
     QJsonObject listPrompts(const QString& cursor, QString* nextCursor = nullptr, int timeoutMs = 10000);
     QJsonObject fetchAllPrompts(int timeoutMs = 10000);
 
+    /// 带 CacheableResult 缓存提示（2026-07-28 ttlMs/cacheScope）的提示词列表
+    QJsonObject listPrompts(McpCacheHint* hint, int timeoutMs = 10000);
+    QJsonObject listPrompts(const QString& cursor, QString* nextCursor, McpCacheHint* hint, int timeoutMs = 10000);
+
     /// 异步获取提示词列表
     void listPromptsAsync(const QString& cursor, std::function<void(const QJsonObject& result, const QString& nextCursor, const QString& error)> callback);
 
@@ -386,12 +405,14 @@ public:
 
     // ========== 其他（对齐 TS `ping()`, `complete()`, `setLoggingLevel()`）==========
 
+    /// 同步 ping。@deprecated in 2026-07-28（ping 已从规范移除；stateless 下直接失败并告警）
     bool ping(int timeoutMs = 5000);
+    /// 异步 ping。@deprecated in 2026-07-28
     void pingAsync(std::function<void(bool success, const QString& error)> callback);
 
     QJsonObject complete(const QJsonObject& ref, const QJsonObject& argument, int timeoutMs = 10000);
     void completeAsync(const QJsonObject& ref, const QJsonObject& argument, std::function<void(const QJsonObject& completion, const QString& error)> callback);
-    /// 设置服务端日志级别，发送 logging/setLevel 请求
+    /// 设置服务端日志级别，发送 logging/setLevel 请求。@deprecated in 2026-07-28（logging 已移除）
     bool setLoggingLevel(const QString& level, int timeoutMs = 5000);
 
     using TrafficLogger = std::function<void(const QJsonObject& event)>;
@@ -418,6 +439,7 @@ public:
      */
     void setRootsProvider(RootsProvider provider);
     void setRootsProvider(QObject* context, RootsProvider provider);
+    /// @deprecated in 2026-07-28（roots/list_changed 已移除；stateless 下不发送，仅告警）
     void notifyRootsListChanged();
 
     // ========== 通知（对齐 TS `notification()` 等）==========
@@ -427,6 +449,17 @@ public:
     void enableNotificationDebounce(const QString& method, int debounceMs = 100);
     /// 发送任意通知给服务端
     void sendNotification(const QString& method, const QJsonObject& params);
+
+    // ========== Subscriptions（2026-07-28, SEP-2330: subscriptions/listen）==========
+
+    /// 异步订阅服务端通知（subscriptions/listen）。订阅通知经由现有 notificationReceived 信号派发。
+    void listenSubscriptionsAsync(const QJsonObject& filter, std::function<void(bool success, const QString& error)> cb);
+
+    /// 同步订阅服务端通知（subscriptions/listen），阻塞等待响应。
+    bool listenSubscriptions(const QJsonObject& filter, int timeoutMs = 10000);
+
+    /// 取消订阅（发送 notifications/cancelled；HTTP 流关闭由 transport 负责）
+    void cancelSubscription(int64_t requestId);
 
     /// 发送请求（异步，对齐 TS `client.request()`）。返回 requestId，可用于 cancelRequest
     int64_t sendRequest(const QString& method, const QJsonObject& params,

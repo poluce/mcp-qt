@@ -3,6 +3,8 @@
 #include <sstream>
 #include <iomanip>
 #include <mutex>
+#include <map>
+#include <cctype>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -42,6 +44,77 @@ static std::string buildUrlEncodedBody(const json& j) {
     return result;
 }
 
+// ============================================================================
+// URL query 解析辅助（RFC 9207 iss 校验用，文件内静态函数）
+// ============================================================================
+
+static int hexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+static std::string percentDecode(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '+') {
+            out += ' ';
+        } else if (s[i] == '%' && i + 2 < s.size()
+                   && std::isxdigit((unsigned char)s[i + 1])
+                   && std::isxdigit((unsigned char)s[i + 2])) {
+            out += static_cast<char>((hexValue(s[i + 1]) << 4) | hexValue(s[i + 2]));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// 解析完整 URL（取 query 部分）或裸 query string，返回解码后的 key/value 映射。
+static std::map<std::string, std::string> parseQueryString(const std::string& urlOrQuery) {
+    std::map<std::string, std::string> result;
+    std::string query = urlOrQuery;
+    const size_t qmark = query.find('?');
+    if (qmark != std::string::npos) query = query.substr(qmark + 1);
+    const size_t hash = query.find('#');
+    if (hash != std::string::npos) query = query.substr(0, hash);
+    std::istringstream iss(query);
+    std::string pair;
+    while (std::getline(iss, pair, '&')) {
+        if (pair.empty()) continue;
+        const size_t eq = pair.find('=');
+        const std::string key = eq == std::string::npos ? pair : pair.substr(0, eq);
+        const std::string val = eq == std::string::npos ? "" : pair.substr(eq + 1);
+        result[percentDecode(key)] = percentDecode(val);
+    }
+    return result;
+}
+
+static std::string getQueryParam(const std::string& urlOrQuery, const std::string& key) {
+    const auto params = parseQueryString(urlOrQuery);
+    const auto it = params.find(key);
+    return it == params.end() ? std::string() : it->second;
+}
+
+// 构建 DCR（RFC 7591）注册请求 body；SEP-837 要求携带 application_type（desktop/CLI 用 "native"）。
+static json buildRegistrationBody(const std::string& clientName,
+                                  const std::vector<std::string>& redirectUris,
+                                  const std::string& applicationType) {
+    json body;
+    body["client_name"] = clientName.empty() ? "mcp-qt-client" : clientName;
+    body["application_type"] = applicationType.empty() ? "native" : applicationType;
+    body["grant_types"] = json::array({"authorization_code", "refresh_token"});
+    body["response_types"] = json::array({"code"});
+    body["token_endpoint_auth_method"] = "none";
+    json uris = json::array();
+    for (const auto& u : redirectUris) uris.push_back(u);
+    body["redirect_uris"] = uris;
+    return body;
+}
+
 // Stubs for network functions (Qt handles network operations natively in _runOAuthQt)
 std::string McpOAuthClient::httpGet(const std::string&) {
     return "";
@@ -65,35 +138,46 @@ bool McpOAuthClient::discoverMetadataSync(const std::string&, OAuthServerMetadat
     return false;
 }
 
-void McpOAuthClient::registerClient(const std::string&, const std::string&, const std::vector<std::string>&, RegistrationCallback callback) {
+void McpOAuthClient::registerClient(const std::string& registrationEndpoint, const std::string& clientName,
+                                    const std::vector<std::string>& redirectUris, RegistrationCallback callback,
+                                    const std::string& applicationType) {
+    // SEP-837: DCR body 必须携带 application_type；当前 httpPost 为 stub（网络由 Qt 层原生处理），
+    // 此处仅保留 body 构建逻辑，验证 application_type 进入请求体。
+    const json body = buildRegistrationBody(clientName, redirectUris, applicationType);
+    (void)httpPost(registrationEndpoint, body.dump());
     if (callback) {
         callback(false, OAuthClientRegistration{}, "Dynamic registration is disabled in pure C++ core");
     }
 }
 
-bool McpOAuthClient::registerClientSync(const std::string&, const std::string&, const std::vector<std::string>&, OAuthClientRegistration*, std::string* errorOut, std::chrono::milliseconds) {
+bool McpOAuthClient::registerClientSync(const std::string& registrationEndpoint, const std::string& clientName,
+                                        const std::vector<std::string>& redirectUris, OAuthClientRegistration*,
+                                        std::string* errorOut, std::chrono::milliseconds,
+                                        const std::string& applicationType) {
+    const json body = buildRegistrationBody(clientName, redirectUris, applicationType);
+    (void)httpPost(registrationEndpoint, body.dump());
     if (errorOut) *errorOut = "Dynamic registration is disabled in pure C++ core";
     return false;
 }
 
-void McpOAuthClient::exchangeCode(const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, TokenCallback callback, const std::string&, bool) {
+void McpOAuthClient::exchangeCode(const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, TokenCallback callback, const std::string&, bool, const std::string&) {
     if (callback) {
         callback(false, OAuthToken{}, "Token exchange is disabled in pure C++ core");
     }
 }
 
-bool McpOAuthClient::exchangeCodeSync(const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, OAuthToken*, std::string* errorOut, std::chrono::milliseconds, const std::string&, bool) {
+bool McpOAuthClient::exchangeCodeSync(const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, const std::string&, OAuthToken*, std::string* errorOut, std::chrono::milliseconds, const std::string&, bool, const std::string&) {
     if (errorOut) *errorOut = "Token exchange is disabled in pure C++ core";
     return false;
 }
 
-void McpOAuthClient::refreshToken(const std::string&, const std::string&, const std::string&, const std::string&, TokenCallback callback) {
+void McpOAuthClient::refreshToken(const std::string&, const std::string&, const std::string&, const std::string&, TokenCallback callback, const std::string&) {
     if (callback) {
         callback(false, OAuthToken{}, "Token refresh is disabled in pure C++ core");
     }
 }
 
-bool McpOAuthClient::refreshTokenSync(const std::string&, const std::string&, const std::string&, const std::string&, OAuthToken*, std::string* errorOut, std::chrono::milliseconds) {
+bool McpOAuthClient::refreshTokenSync(const std::string&, const std::string&, const std::string&, const std::string&, OAuthToken*, std::string* errorOut, std::chrono::milliseconds, const std::string&) {
     if (errorOut) *errorOut = "Token refresh is disabled in pure C++ core";
     return false;
 }
@@ -208,8 +292,67 @@ bool McpOAuthClient::hasValidToken() const {
     return !m_currentToken.accessToken.empty() && !m_currentToken.isExpired();
 }
 
+std::vector<std::string> McpOAuthClient::requestedScopes() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_requestedScopes;
+}
+
+void McpOAuthClient::recordRequestedScopes(const std::vector<std::string>& scopes) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_requestedScopes = scopes;
+}
+
+void McpOAuthClient::clearRequestedScopes() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_requestedScopes.clear();
+}
+
 void McpOAuthClient::setStoredToken(const OAuthToken& token) {
-    setCurrentToken(token);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_currentToken = token;
+    // SEP-2352: token 带 issuer 时同时按 issuer 键控持久化，供不同授权服务器隔离使用。
+    if (!token.issuer.empty()) {
+        m_tokensByIssuer[token.issuer] = token;
+    }
+}
+
+bool McpOAuthClient::hasTokenForIssuer(const std::string& issuer) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_tokensByIssuer.find(issuer) != m_tokensByIssuer.end();
+}
+
+OAuthToken McpOAuthClient::getTokenForIssuer(const std::string& issuer) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_tokensByIssuer.find(issuer);
+    return it == m_tokensByIssuer.end() ? OAuthToken{} : it->second;
+}
+
+void McpOAuthClient::setStoredTokenForIssuer(const std::string& issuer, const OAuthToken& token) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_tokensByIssuer[issuer] = token;
+}
+
+bool McpOAuthClient::validateAuthorizationIss(const std::string& authorizationResponseUrlOrQuery,
+                                              const std::string& expectedIssuer,
+                                              std::string* error) const {
+    // RFC 9207 (SEP-2468): authorization response 的 query 携带 iss 时必须与记录中的
+    // 授权服务器 issuer 完全匹配；缺失 iss 视为不安全（此处按严格模式返回 false）。
+    // 不依赖任何可变成员，线程安全。
+    const auto params = parseQueryString(authorizationResponseUrlOrQuery);
+    const auto it = params.find("iss");
+    if (it == params.end()) {
+        if (error) {
+            *error = "authorization response does not contain 'iss' parameter (RFC 9207 requires it)";
+        }
+        return false;
+    }
+    if (it->second != expectedIssuer) {
+        if (error) {
+            *error = "authorization response 'iss' (" + it->second + ") does not match expected issuer (" + expectedIssuer + ")";
+        }
+        return false;
+    }
+    return true;
 }
 
 } // namespace mcp

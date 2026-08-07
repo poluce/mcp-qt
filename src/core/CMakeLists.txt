@@ -6,11 +6,13 @@ add_library(mcp_core STATIC
     include/mcp_core/McpMessage.h
     include/mcp_core/McpTool.h
     include/mcp_core/McpClientSession.h
+    include/mcp_core/McpHeaderEncoding.h
     include/mcp_core/JsonRpcDispatcher.h
     include/mcp_core/McpOAuthClient.h
     src/JsonRpcDispatcher.cpp
     src/McpClientSession.cpp
     src/McpOAuthClient.cpp
+    src/McpHeaderEncoding.cpp
 )
 
 target_include_directories(mcp_core PUBLIC

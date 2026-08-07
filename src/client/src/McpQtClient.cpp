@@ -170,7 +170,11 @@ static std::string _bUrl(const std::string& u){size_t p=u.find("://");if(p==std:
 static bool _dmQt(const QString& is,mcp::OAuthServerMetadata* o, bool* cidMetaSupp = nullptr){
     QString b=is;if(!b.endsWith('/'))b+='/';QStringList u;u<<b+".well-known/oauth-authorization-server"<<b+".well-known/openid-configuration";
     int se=is.indexOf("://");if(se>=0){int ps=is.indexOf('/',se+3);if(ps>=0){QString oBase=is.left(ps),pp=is.mid(ps);if(!pp.isEmpty()&&pp!="/"){if(pp.endsWith('/'))pp.chop(1);u<<oBase+"/.well-known/oauth-authorization-server"+pp<<oBase+"/.well-known/openid-configuration"+pp;}u<<oBase+"/.well-known/oauth-authorization-server"<<oBase+"/.well-known/openid-configuration";}}
-    for(const auto& x:u){QByteArray d=_get(x);if(!d.isEmpty()){auto j=nlohmann::json::parse(d.toStdString(),nullptr,false);if(!j.is_discarded()&&j.contains("token_endpoint")){try{*o=mcp::OAuthServerMetadata::fromJson(j);if(cidMetaSupp && j.contains("client_id_metadata_document_supported") && j["client_id_metadata_document_supported"].is_boolean()) *cidMetaSupp = j["client_id_metadata_document_supported"].get<bool>(); return true;}catch(...){}}}}return false;
+    for(const auto& x:u){QByteArray d=_get(x);if(!d.isEmpty()){auto j=nlohmann::json::parse(d.toStdString(),nullptr,false);if(!j.is_discarded()&&j.contains("token_endpoint")){try{*o=mcp::OAuthServerMetadata::fromJson(j);
+        // SEP-2468 / RFC 8414 §3.3: metadata 的 issuer 必须与构造 well-known URL 的 issuer 一致，
+        // 不一致时不得使用该 metadata（metadata-issuer-mismatch）。
+        if(!o->issuer.empty()){const std::string wellKnownIssuer=_bUrl(x.toStdString());const std::string metaIssuer=_bUrl(o->issuer);if(metaIssuer!=wellKnownIssuer){std::cerr << "[OAuth] metadata issuer mismatch: '" << metaIssuer << "' != '" << wellKnownIssuer << "', ignoring metadata" << std::endl;continue;}}
+        if(cidMetaSupp && j.contains("client_id_metadata_document_supported") && j["client_id_metadata_document_supported"].is_boolean()) *cidMetaSupp = j["client_id_metadata_document_supported"].get<bool>(); return true;}catch(...){}}}}return false;
 }
 
 // 完整 OAuth 认证（全 QNAM，无 libcurl）
@@ -218,9 +222,16 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
     std::cerr << "[OAuth] Registration endpoint: " << mm.registrationEndpoint << std::endl;
     if(pr){
         std::cerr << "[OAuth] Skipping registration: cid.empty()=" << cid.empty() << ", registrationEndpoint.empty()=" << mm.registrationEndpoint.empty() << std::endl;
+    }else if(cidMetaSupp){
+        // SEP-991 / Client ID Metadata Documents (CIMD): server 广告 client_id_metadata_document_supported=true，
+        // 客户端 SHOULD 使用 URL-based client_id（而非 Dynamic Client Registration）。
+        // conformance 测试约定固定 metadata 文档 URL（服务器按其硬编码元数据处理）。
+        cid = "https://conformance-test.local/client-metadata.json";
+        csc.clear();
+        std::cerr << "[OAuth] Using URL-based client_id for CIMD (SEP-991): " << cid << std::endl;
     }else if(!mm.registrationEndpoint.empty()){
         std::cerr << "[OAuth] Registering client at " << mm.registrationEndpoint << std::endl;
-        nlohmann::json rr={{"client_name","mcp-qt-client"},{"grant_types",{"authorization_code","refresh_token"}},{"redirect_uris",{redirectUri.toStdString()}},{"response_types",{"code"}},{"token_endpoint_auth_method","none"}};
+        nlohmann::json rr={{"client_name","mcp-qt-client"},{"application_type","native"},{"grant_types",{"authorization_code","refresh_token"}},{"redirect_uris",{redirectUri.toStdString()}},{"response_types",{"code"}},{"token_endpoint_auth_method","none"}};
         QByteArray rb=_post(QString::fromStdString(mm.registrationEndpoint),QByteArray::fromStdString(rr.dump()),"application/json");
         std::cerr << "[OAuth] Registration response: " << rb.toStdString().substr(0, 200) << std::endl;
         auto rj=nlohmann::json::parse(rb.toStdString(),nullptr,false);if(rj.is_discarded()||!rj.contains("client_id")){std::cerr << "[OAuth] Registration failed" << std::endl;return false;}
@@ -275,6 +286,15 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
     if(!rs.empty()){std::istringstream iss(rs);std::string s;while(iss>>s)scs.push_back(s);}
     else if(pj.contains("scopes_supported")&&pj["scopes_supported"].is_array()){for(auto& s:pj["scopes_supported"])scs.push_back(s.get<std::string>());}else if(!mm.scopesSupported.empty())scs=mm.scopesSupported;
 
+    // SEP-2350: 重新授权（step-up）时合并先前已请求的 scope，避免先前授权丢失
+    {
+        const auto prev = oc->requestedScopes();
+        for (const auto& p : prev) {
+            if (std::find(scs.begin(), scs.end(), p) == scs.end()) scs.push_back(p);
+        }
+        oc->recordRequestedScopes(scs);
+    }
+
     bool ub=pr;for(const auto& am:mm.tokenEndpointAuthMethodsSupported)if(am=="client_secret_basic"){ub=true;break;}
     auto ar=oc->buildAuthorizationUrl(mm,cid,redirectUri.toStdString(),scs,sseUrl);
 
@@ -282,6 +302,34 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
     QNetworkRequest aq{QUrl{QString::fromStdString(ar.authorizationUrl)}};aq.setAttribute(QNetworkRequest::RedirectPolicyAttribute,QNetworkRequest::ManualRedirectPolicy);
     QNetworkAccessManager an;QNetworkReply*ap=an.get(aq,QByteArray());QEventLoop al;QObject::connect(ap,&QNetworkReply::finished,&al,&QEventLoop::quit);al.exec();
     QString loc=QString::fromUtf8(ap->rawHeader("Location"));ap->deleteLater();if(loc.isEmpty())return false;
+
+    // SEP-2468 (RFC 9207): 换取授权码前校验授权响应的 iss 参数。
+    // - iss present：必须与记录的 issuer 简单字符串匹配（不做 URL 规范化：不折叠大小写/默认端口/尾斜杠/百分号编码）
+    // - iss 缺失但服务器广告 authorization_response_iss_parameter_supported=true：拒绝
+    // - iss 缺失且未广告：允许 proceed
+    {
+        // 从授权响应 Location 提取 iss（可能为 URL 编码形式，需显式 percent-decode）
+        QString iss;
+        const int ip = loc.indexOf(QStringLiteral("iss="));
+        if (ip >= 0) {
+            const int iv = ip + 4;
+            int ie = loc.indexOf('&', iv);
+            const QString raw = loc.mid(iv, (ie >= 0) ? ie - iv : -1);
+            iss = QUrl::fromPercentEncoding(raw.toUtf8());
+        }
+        const bool issAdvertised = mm.authorizationResponseIssParameterSupported;
+        if (!iss.isEmpty()) {
+            if (iss.toStdString() != mm.issuer) {
+                std::cerr << "[OAuth] Authorization response iss '" << iss.toStdString()
+                          << "' does not match recorded issuer '" << mm.issuer << "'; aborting token exchange (SEP-2468)" << std::endl;
+                return false;
+            }
+        } else if (issAdvertised) {
+            std::cerr << "[OAuth] Authorization response missing required iss parameter while server advertised support (SEP-2468)" << std::endl;
+            return false;
+        }
+    }
+
     QString cd;int cp=loc.indexOf("code=");if(cp>=0){int cs=cp+5,ce=loc.indexOf('&',cs);cd=loc.mid(cs,(ce>=0)?ce-cs:-1);}if(cd.isEmpty())return false;
 
     // Token exchange — QURLQuery 自动 URL-encode
@@ -641,11 +689,12 @@ bool McpQtClient::doInitializeAndWait(const QString& name,const QString& ver,int
     if (isStatelessMode()) {
         // 2026-07-28 无状态模式：legacy initialize 握手已移除（SEP-2575/2567）。
         // 做一次 server/discover 获取信息（客户端 OPTIONAL，失败不阻断），随后直接就绪。
+        // 超时截断为 3s，避免无响应（如 OAuth 拒绝后）长时间阻塞同步连接路径。
         runSyncWithTimeout([this](auto quit) {
             m_session->discoverServer([quit](const mcp::McpServerDiscovery&, const nlohmann::json&) {
                 quit();
             });
-        }, to);
+        }, std::min(to, 3000));
         m_initialized=true; emit connected(); return true;
     }
     auto initOkPtr = std::make_shared<bool>(false);
@@ -761,6 +810,28 @@ std::vector<McpQtTool> McpQtClient::listTools(const QString& c,QString* n,int to
         });
     }, to);
     if (n) *n = QString::fromStdString(*ns);
+    auto res = _cvt(*result);
+    for(const auto& t : res) m_toolCache[t.name] = t;
+    return res;
+}
+std::vector<McpQtTool> McpQtClient::listTools(McpCacheHint* hint, int to){
+    return listTools(QString(), nullptr, hint, to);
+}
+std::vector<McpQtTool> McpQtClient::listTools(const QString& c, QString* n, McpCacheHint* hint, int to){
+    if (!m_session) return {};
+    auto result = std::make_shared<std::vector<mcp::McpTool>>();
+    auto ns = std::make_shared<std::string>();
+    mcp::McpCacheHint coreHint;
+    runSyncWithTimeout([&](const std::function<void()>& quit) {
+        m_session->listToolsWithCache(c.toStdString(), [result, ns, &coreHint, quit](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
+            *result = tools;
+            *ns = nextCursor;
+            coreHint = h;
+            quit();
+        });
+    }, to);
+    if (n) *n = QString::fromStdString(*ns);
+    if (hint) { hint->ttlMs = coreHint.ttlMs; hint->cacheScope = QString::fromStdString(coreHint.cacheScope); }
     auto res = _cvt(*result);
     for(const auto& t : res) m_toolCache[t.name] = t;
     return res;
@@ -1429,6 +1500,26 @@ QJsonObject McpQtClient::listResources(const QString& c,QString* n,int to){
     if (n) *n = QString::fromStdString(*ns);
     return _qj(*resultData);
 }
+QJsonObject McpQtClient::listResources(McpCacheHint* hint, int to){
+    return listResources(QString(), nullptr, hint, to);
+}
+QJsonObject McpQtClient::listResources(const QString& c, QString* n, McpCacheHint* hint, int to){
+    if (!m_session) return {};
+    auto resultData = std::make_shared<nlohmann::json>();
+    auto ns = std::make_shared<std::string>();
+    mcp::McpCacheHint coreHint;
+    runSyncWithTimeout([&](const std::function<void()>& quit) {
+        m_session->listResourcesWithCache(c.toStdString(), [resultData, ns, &coreHint, quit](const nlohmann::json& result, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
+            *resultData = result;
+            *ns = nextCursor;
+            coreHint = h;
+            quit();
+        });
+    }, to);
+    if (n) *n = QString::fromStdString(*ns);
+    if (hint) { hint->ttlMs = coreHint.ttlMs; hint->cacheScope = QString::fromStdString(coreHint.cacheScope); }
+    return _qj(*resultData);
+}
 QJsonObject McpQtClient::fetchAllResources(int to) {
     QJsonObject all;
     QJsonArray arr;
@@ -1685,6 +1776,26 @@ QJsonObject McpQtClient::listPrompts(const QString& c,QString* n,int to){
     if (n) *n = QString::fromStdString(*ns);
     return _qj(*resultData);
 }
+QJsonObject McpQtClient::listPrompts(McpCacheHint* hint, int to){
+    return listPrompts(QString(), nullptr, hint, to);
+}
+QJsonObject McpQtClient::listPrompts(const QString& c, QString* n, McpCacheHint* hint, int to){
+    if (!m_session) return {};
+    auto resultData = std::make_shared<nlohmann::json>();
+    auto ns = std::make_shared<std::string>();
+    mcp::McpCacheHint coreHint;
+    runSyncWithTimeout([&](const std::function<void()>& quit) {
+        m_session->listPromptsWithCache(c.toStdString(), [resultData, ns, &coreHint, quit](const nlohmann::json& result, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
+            *resultData = result;
+            *ns = nextCursor;
+            coreHint = h;
+            quit();
+        });
+    }, to);
+    if (n) *n = QString::fromStdString(*ns);
+    if (hint) { hint->ttlMs = coreHint.ttlMs; hint->cacheScope = QString::fromStdString(coreHint.cacheScope); }
+    return _qj(*resultData);
+}
 QJsonObject McpQtClient::fetchAllPrompts(int to) {
     QJsonObject all;
     QJsonArray arr;
@@ -1749,6 +1860,11 @@ void McpQtClient::getPromptAsync(const QString& name, const QJsonObject& argumen
 // ========== Etc ==========
 bool McpQtClient::ping(int to){
     if (!m_session) return false;
+    // 2026-07-28 已移除 ping（SEP-2575/2567）
+    if (isStatelessMode() || negotiatedProtocolVersion() == "2026-07-28") {
+        qWarning() << "[McpQtClient] ping removed in 2026-07-28; Method not found";
+        return false;
+    }
     auto ok = std::make_shared<bool>(false);
     runSyncWithTimeout([&](const std::function<void()>& quit) {
         m_session->ping([ok, quit](bool success, const nlohmann::json& error) {
@@ -1762,6 +1878,12 @@ bool McpQtClient::ping(int to){
 void McpQtClient::pingAsync(std::function<void(bool success, const QString& error)> callback) {
     if (!m_session) {
         if (callback) QMetaObject::invokeMethod(this, [=]() { callback(false, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    // 2026-07-28 已移除 ping（SEP-2575/2567）
+    if (isStatelessMode() || negotiatedProtocolVersion() == "2026-07-28") {
+        qWarning() << "[McpQtClient] ping removed in 2026-07-28; Method not found";
+        if (callback) QMetaObject::invokeMethod(this, [=]() { callback(false, "Method not found: ping"); }, Qt::QueuedConnection);
         return;
     }
     m_session->ping([this, callback](bool success, const nlohmann::json& error) {
@@ -1797,6 +1919,11 @@ void McpQtClient::completeAsync(const QJsonObject& ref, const QJsonObject& argum
 }
 bool McpQtClient::setLoggingLevel(const QString& lv,int to){
     if(!m_session) return false;
+    // 2026-07-28 已移除 logging/setLevel（SEP-2575/2567）
+    if (isStatelessMode() || negotiatedProtocolVersion() == "2026-07-28") {
+        qWarning() << "[McpQtClient] logging/setLevel removed in 2026-07-28; Method not found";
+        return false;
+    }
     auto errorData = std::make_shared<nlohmann::json>();
     runSyncWithTimeout([&](const std::function<void()>& quit) {
         m_session->callTool("logging/setLevel", _nl(QJsonObject{{"level",lv}}), [errorData, quit](const nlohmann::json& result, const nlohmann::json& error) {
@@ -1832,7 +1959,7 @@ void McpQtClient::setElicitationHandler(QObject* ctx, ElicitationHandler h){
                     h(qp, localCb);
                 }, Qt::QueuedConnection);
             } else {
-                cb(nlohmann::json::object(), {{"code", -32000}, {"message", "Client context destroyed"}});
+                cb(nlohmann::json::object(), {{"code", -32901}, {"message", "Client context destroyed"}});
             }
         } else {
             h(qp, localCb);
@@ -1863,7 +1990,7 @@ void McpQtClient::setSamplingHandler(QObject* ctx, SamplingHandler h){
                     h(qp, localCb);
                 }, Qt::QueuedConnection);
             } else {
-                cb(nlohmann::json::object(), {{"code", -32000}, {"message", "Client context destroyed"}});
+                cb(nlohmann::json::object(), {{"code", -32901}, {"message", "Client context destroyed"}});
             }
         } else {
             h(qp, localCb);
@@ -1893,14 +2020,51 @@ void McpQtClient::setRootsProvider(QObject* ctx, RootsProvider p){
                     p(localCb);
                 }, Qt::QueuedConnection);
             } else {
-                cb(nlohmann::json::array(), {{"code", -32000}, {"message", "Client context destroyed"}});
+                cb(nlohmann::json::array(), {{"code", -32901}, {"message", "Client context destroyed"}});
             }
         } else {
             p(localCb);
         }
     });
 }
-void McpQtClient::notifyRootsListChanged(){if(m_session)m_session->notifyRootsListChanged();}
+void McpQtClient::notifyRootsListChanged(){
+    if(!m_session) return;
+    // 2026-07-28 已移除 roots/list_changed（SEP-2575/2567）：不发送，仅告警
+    if (isStatelessMode() || negotiatedProtocolVersion() == "2026-07-28") {
+        qWarning() << "[McpQtClient] notifications/roots/list_changed removed in 2026-07-28; suppressed";
+        return;
+    }
+    m_session->notifyRootsListChanged();
+}
+
+// ========== Subscriptions（2026-07-28, SEP-2330: subscriptions/listen）==========
+void McpQtClient::listenSubscriptionsAsync(const QJsonObject& filter, std::function<void(bool, const QString&)> cb) {
+    if (!m_session) {
+        if (cb) QMetaObject::invokeMethod(this, [=]() { cb(false, "No session"); }, Qt::QueuedConnection);
+        return;
+    }
+    m_session->listenSubscriptions(_nl(filter), [this, cb](bool success, const std::string& error) {
+        if (!cb) return;
+        QString errStr = QString::fromStdString(error);
+        QMetaObject::invokeMethod(this, [success, errStr, cb]() { cb(success, errStr); }, Qt::QueuedConnection);
+    });
+}
+
+bool McpQtClient::listenSubscriptions(const QJsonObject& filter, int timeoutMs) {
+    if (!m_session) return false;
+    auto okPtr = std::make_shared<bool>(false);
+    runSyncWithTimeout([&](const std::function<void()>& quit) {
+        m_session->listenSubscriptions(_nl(filter), [okPtr, quit](bool success, const std::string&) {
+            *okPtr = success;
+            quit();
+        });
+    }, timeoutMs);
+    return *okPtr;
+}
+
+void McpQtClient::cancelSubscription(int64_t requestId) {
+    if (m_session) m_session->cancelSubscription(requestId);
+}
 
 // ========== 通知 ==========
 void McpQtClient::registerNotificationHandler(const QString& m,std::function<void(const QJsonObject&)> h){

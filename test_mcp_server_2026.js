@@ -481,6 +481,49 @@ function processMcpRequest(body, headers) {
           { supported: SUPPORTED_VERSIONS, requested: (params && params.protocolVersion) || 'legacy initialize' })
       };
 
+    case 'subscriptions/listen': {
+      // 2026-07-28 订阅长连接：先回 acknowledged，再按请求过滤器下发通知，最后优雅关闭（空 result）
+      const requested = params && params.notifications ? params.notifications : {};
+      const subId = id;
+      const acknowledged = {};
+      for (const k of Object.keys(requested)) {
+        if (requested[k] !== undefined && requested[k] !== null && requested[k] !== false) {
+          acknowledged[k] = requested[k];
+        }
+      }
+      const events = [
+        {
+          jsonrpc: '2.0',
+          method: 'notifications/subscriptions/acknowledged',
+          params: {
+            _meta: { 'io.modelcontextprotocol/subscriptionId': subId },
+            notifications: acknowledged
+          }
+        }
+      ];
+      if (requested.toolsListChanged) {
+        events.push({
+          jsonrpc: '2.0',
+          method: 'notifications/tools/list_changed',
+          params: { _meta: { 'io.modelcontextprotocol/subscriptionId': subId } }
+        });
+      }
+      if (requested.resourceSubscriptions && Array.isArray(requested.resourceSubscriptions)
+          && requested.resourceSubscriptions.includes('file:///logs/system.log')) {
+        events.push({
+          jsonrpc: '2.0',
+          method: 'notifications/resources/updated',
+          params: { _meta: { 'io.modelcontextprotocol/subscriptionId': subId }, uri: 'file:///logs/system.log' }
+        });
+      }
+      return {
+        handled: true,
+        status: 200,
+        sseEvents: events,
+        response: complete({ _meta: { 'io.modelcontextprotocol/subscriptionId': subId } })
+      };
+    }
+
     case 'ping':
     case 'logging/setLevel':
     case 'resources/subscribe':
@@ -547,6 +590,20 @@ const server = http.createServer((req, res) => {
     if (outcome.response === null) {
       // 通知 -> 202 Accepted 无 body
       res.writeHead(outcome.status, { 'Content-Type': 'application/json' });
+      res.end();
+      return;
+    }
+
+    if (outcome.sseEvents) {
+      // subscriptions/listen 长连接：SSE 事件 + 最终 JSON-RPC 响应后优雅关闭
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'X-Accel-Buffering': 'no'
+      });
+      for (const ev of outcome.sseEvents) {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      }
+      res.write(`data: ${JSON.stringify(resultResponse(request.id, outcome.response))}\n\n`);
       res.end();
       return;
     }
