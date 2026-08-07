@@ -3,6 +3,7 @@
 #include <mcp_qt_transport/QtHttpSseTransport.h>
 #include <mcp_core/McpOAuthClient.h>
 #include <QTimer>
+#include <atomic>
 #include <iostream>
 
 namespace mcp_conformance {
@@ -151,6 +152,11 @@ static int _raQt(const RunnerConfig& c, bool ct) {
         t->setProtocolVersion(c.protocolVersion);
     }
 
+    // 2026-07-28 无状态模式：跳过 legacy initialize 握手（SEP-2575/2567）
+    if (c.protocolVersion.empty() || c.protocolVersion == "2026-07-28") {
+        cl->setStatelessMode(true);
+    }
+
     // 设置 OAuth 支持
     auto oc = cl->oauthClient();
     t->setTokenProvider([oc]() -> std::string {
@@ -161,9 +167,12 @@ static int _raQt(const RunnerConfig& c, bool ct) {
     // OAuth 重试计数器（限制最多 3 次，符合 auth/scope-retry-limit 场景要求）
     auto authRetryCount = std::make_shared<int>(0);
     constexpr int kMaxAuthRetries = 3;
+    // OAuth 失败标志：拒绝类场景（iss 不匹配/缺失等）中客户端必须快速失败，避免超时
+    auto oauthFailed = std::make_shared<std::atomic<bool>>(false);
 
-    t->setAuthRetryHandler([oc, &c, authRetryCount](const std::string& wwwAuth) -> bool {
+    t->setAuthRetryHandler([oc, &c, authRetryCount, oauthFailed](const std::string& wwwAuth) -> bool {
         if (!oc) return false;
+        if (*oauthFailed) return false;
 
         // 检查重试次数限制
         (*authRetryCount)++;
@@ -180,12 +189,19 @@ static int _raQt(const RunnerConfig& c, bool ct) {
             if (c.context.contains("private_key_pem")) ctx["private_key_pem"] = c.context["private_key_pem"];
             if (c.context.contains("signing_algorithm")) ctx["signing_algorithm"] = c.context["signing_algorithm"];
         }
-        return mcp_qt::McpQtClient::runOAuthFlow(c.serverUrl, ctx, wwwAuth, oc);
+        bool ok = mcp_qt::McpQtClient::runOAuthFlow(c.serverUrl, ctx, wwwAuth, oc);
+        if (!ok) {
+            *oauthFailed = true;
+            return false;
+        }
+        return true;
     });
 
     QString errStr;
     // 使用 connectToTransportAndWait 自动进行 initialize 握手与 Auth 认证逻辑
     if (!cl->connectToTransportAndWait(t, "mcp-qt-client", "1.0.0", 15000, &errStr)) return 1;
+    // OAuth 拒绝（iss 校验失败等）：客户端应整体失败，不再继续（allowClientError 场景）
+    if (*oauthFailed) return 1;
 
     QEventLoop loop;
     bool hasError = false;

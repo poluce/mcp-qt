@@ -6,6 +6,7 @@ add_executable(mcp_client_conformance_qt
     ScenarioHandlersAuthQt.cpp
     ScenarioHandlersStateless.cpp
     ScenarioHandlersStatelessHttp.cpp
+    ScenarioHandlersStateless2026.cpp
     ConsoleStdioTransport.cpp
     main_qt.cpp
 )

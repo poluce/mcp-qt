@@ -176,6 +176,118 @@ int runStateless20260728Http(const RunnerConfig& config) {
     }
     std::cout << "[PASS] MRTR approve_delete: input_required -> resend with inputResponses -> complete" << std::endl;
 
+    // ---------- 5. subscriptions/listen（SEP-2575 subscriptions 模式） ----------
+    {
+        bool ackObserved = false;
+        bool changedObserved = false;
+        bool subscribeOk = false;
+        std::string subscribeError;
+
+        session->setSubscriptionListener(
+            [&ackObserved, &changedObserved](int64_t subscriptionId, const std::string& method, const nlohmann::json&) {
+                (void)subscriptionId;
+                if (method == "notifications/subscriptions/acknowledged") {
+                    ackObserved = true;
+                } else if (method == "notifications/tools/list_changed") {
+                    changedObserved = true;
+                }
+            });
+
+        ok = runBlocking([&session, &subscribeOk, &subscribeError](const std::function<void()>& done) {
+            session->listenSubscriptions({{"toolsListChanged", true}},
+                                          [&subscribeOk, &subscribeError, done](bool success, const std::string& error) {
+                                              subscribeOk = success;
+                                              subscribeError = error;
+                                              done();
+                                          });
+        });
+        if (!ok) {
+            std::cerr << "[FAIL] subscriptions/listen timed out" << std::endl;
+            return 1;
+        }
+        if (!subscribeOk) {
+            std::cerr << "[FAIL] subscriptions/listen error: " << subscribeError << std::endl;
+            return 1;
+        }
+        if (!ackObserved || !changedObserved) {
+            std::cerr << "[FAIL] subscriptions/listen did not deliver acknowledged/list_changed"
+                      << " (ack=" << ackObserved << ", changed=" << changedObserved << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "[PASS] subscriptions/listen: acknowledged + tools/list_changed delivered" << std::endl;
+    }
+
+    // ---------- 6. listToolsWithCache（CacheableResult, SEP-2549） ----------
+    {
+        mcp::McpCacheHint hint;
+        std::string nextCursor;
+        ok = runBlocking([&session, &hint, &nextCursor, &err](const std::function<void()>& done) {
+            session->listToolsWithCache("",
+                [&hint, &nextCursor, &err, done](const std::vector<mcp::McpTool>&,
+                                                 const std::string& nc, const mcp::McpCacheHint& h, const nlohmann::json& e) {
+                    hint = h;
+                    nextCursor = nc;
+                    err = e;
+                    done();
+                });
+        });
+        if (!ok) {
+            std::cerr << "[FAIL] listToolsWithCache timed out" << std::endl;
+            return 1;
+        }
+        if (!err.empty() || hint.ttlMs < 0 || hint.cacheScope.empty()) {
+            std::cerr << "[FAIL] listToolsWithCache missing cache hint (ttlMs=" << hint.ttlMs
+                      << ", cacheScope='" << hint.cacheScope << "'): " << err.dump() << std::endl;
+            return 1;
+        }
+        std::cout << "[PASS] listToolsWithCache: ttlMs=" << hint.ttlMs << ", cacheScope=" << hint.cacheScope << std::endl;
+    }
+
+    // ---------- 7. x-mcp-header（SEP-2243）：approve_delete 带 region 参数镜像为 Mcp-Param-Region ----------
+    {
+        // 先拉取第二页工具，让 session 缓存 approve_delete 的 inputSchema（含 x-mcp-header 注解）
+        ok = runBlocking([&session, &err](const std::function<void()>& done) {
+            session->listTools("page_2",
+                [&err, done](const std::vector<mcp::McpTool>&, const std::string&, const nlohmann::json& e) {
+                    err = e;
+                    done();
+                });
+        });
+        if (!ok) {
+            std::cerr << "[FAIL] tools/list page_2 timed out" << std::endl;
+            return 1;
+        }
+        if (!err.empty()) {
+            std::cerr << "[FAIL] tools/list page_2 error: " << err.dump() << std::endl;
+            return 1;
+        }
+
+        nlohmann::json xResult;
+        ok = runBlocking([&session, &xResult, &err](const std::function<void()>& done) {
+            session->callTool("approve_delete", {{"target", "prod-db"}, {"region", "华东-1"}},
+                              [&xResult, &err, done](const nlohmann::json& content, const nlohmann::json& e) {
+                                  xResult = content;
+                                  err = e;
+                                  done();
+                              });
+        });
+        if (!ok) {
+            std::cerr << "[FAIL] approve_delete with region timed out" << std::endl;
+            return 1;
+        }
+        if (!err.empty()) {
+            // mock 校验 Mcp-Param-Region 失败会返回 HeaderMismatch(-32020)
+            std::cerr << "[FAIL] approve_delete with region error: " << err.dump() << std::endl;
+            return 1;
+        }
+        bool xComplete = xResult.contains("resultType") && xResult["resultType"] == "complete";
+        if (!xComplete) {
+            std::cerr << "[FAIL] approve_delete with region not complete: " << xResult.dump() << std::endl;
+            return 1;
+        }
+        std::cout << "[PASS] x-mcp-header: approve_delete region mirrored to Mcp-Param-Region (MRTR round-trip preserved)" << std::endl;
+    }
+
     std::cout << "=== 2026-07-28 stateless HTTP end-to-end: ALL PASS ===" << std::endl;
     session->close();
     return 0;
