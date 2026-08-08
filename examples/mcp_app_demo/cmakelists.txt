@@ -1,0 +1,35 @@
+add_executable(mcp_app_demo
+    main.cpp
+)
+
+target_include_directories(mcp_app_demo PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/apps/include
+    ${CMAKE_SOURCE_DIR}/src/client/include
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/transport/include
+)
+
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
+
+target_link_libraries(mcp_app_demo PRIVATE
+    mcp_qt_apps
+    mcp_qt_client
+    mcp_qt_transport
+    mcp_core
+    nlohmann_json::nlohmann_json
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::Network
+)
+
+# 运行时可执行文件旁需提供 WebView2Loader.dll（动态加载，无需链接 MSVC 静态库）
+if(WIN32)
+    add_custom_command(TARGET mcp_app_demo POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/third_party/webview2/sdk/runtimes/win-x64/native/WebView2Loader.dll"
+            "$<TARGET_FILE_DIR:mcp_app_demo>/WebView2Loader.dll"
+        COMMENT "Copy WebView2Loader.dll"
+    )
+    target_link_libraries(mcp_app_demo PRIVATE user32 ole32 oleaut32)
+endif()
