@@ -562,6 +562,16 @@ public:
     bool isStatelessMode() const;
     bool isReady() const;
 
+    /**
+     * @brief 设置每请求日志级别（MCP 2026-07-28, SEP-2577）。
+     *        非空时注入到请求 _meta 的 io.modelcontextprotocol/logLevel，
+     *        服务端据此决定是否在该请求的响应流上发送 notifications/message。
+     *        传空字符串则停止注入（服务端 MUST NOT 发送日志通知）。
+     *        仅 stateless / 2026-07-28 模式下生效。
+     */
+    void setLogLevel(const std::string& level);
+    std::string getLogLevel() const;
+
     void registerCapabilities(const json& capabilities);
     std::string getNegotiatedProtocolVersion() const;
     json getServerCapabilities() const;
@@ -622,6 +632,7 @@ private:
         {"elicitation", {{"modes", {"form", "url"}}}}
     };
     bool m_statelessMode{false};
+    std::string m_requestLogLevel;  // 2026-07-28 per-request logLevel（空=不注入）
     std::string m_clientName{"mcp-qt-client"};
     std::string m_clientVersion{"1.0.0"};
     std::string m_negotiatedProtocolVersion;

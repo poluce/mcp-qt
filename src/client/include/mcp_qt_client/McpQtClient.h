@@ -58,6 +58,16 @@ struct McpResult {
     QList<McpContent> contents;
 };
 
+/// W3C Trace Context（分布式追踪，2026-07-28 SEP-414 / W3C Trace-Context）。
+/// 非空时 SDK 会将其作为 HTTP 请求头（traceparent / tracestate / baggage）随每个请求发送，
+/// 使 MCP 服务器上的 span 嵌套进调用方已有的分布式 trace。
+struct McpTraceContext {
+    QString traceparent;   // W3C Trace-Context: "00-<trace-id>-<parent-id>-<flags>"
+    QString tracestate;    // 可选 vendor 状态
+    QString baggage;       // 可选 baggage 头
+    bool empty() const { return traceparent.isEmpty() && tracestate.isEmpty() && baggage.isEmpty(); }
+};
+
 /// MCP 2026-07-28 CacheableResult 缓存提示（ttlMs/cacheScope），由 list/read 结果解析。
 struct McpCacheHint {
     qint64 ttlMs{-1};
@@ -102,6 +112,12 @@ public:
     McpQtClientBuilder& setReconnectPolicy(const mcp::McpReconnectPolicy& policy);
     McpQtClientBuilder& setProtocolVersion(const QString& version);
     McpQtClientBuilder& setStatelessMode(bool enabled);
+    /// MCP 2026-07-28 per-request logLevel（SEP-2577）：后续每个请求注入
+    /// _meta.io.modelcontextprotocol/logLevel。空字符串停止注入。
+    McpQtClientBuilder& setRequestLogLevel(const QString& level);
+    /// 设置 W3C trace context（分布式追踪）：连接建立后 traceparent/tracestate/baggage
+    /// 会随每个 HTTP 请求发送。
+    McpQtClientBuilder& setTraceContext(const McpTraceContext& ctx);
     std::shared_ptr<McpQtClient> buildAndConnectAndWait(QString* errorString = nullptr);
     std::shared_ptr<McpQtClient> buildAndConnectAsync();
 private:
@@ -114,6 +130,8 @@ private:
     QString m_protocolVersion{QStringLiteral("2026-07-28")};
     bool m_statelessMode{false};
     int m_timeoutMs{10000};
+    QString m_requestLogLevel;  // 2026-07-28 per-request logLevel
+    McpTraceContext m_traceContext;  // W3C trace context
     QMap<QString, QString> m_env;
     QMap<QString, QString> m_httpHeaders;
     std::optional<QNetworkProxy> m_proxy;
@@ -412,8 +430,20 @@ public:
 
     QJsonObject complete(const QJsonObject& ref, const QJsonObject& argument, int timeoutMs = 10000);
     void completeAsync(const QJsonObject& ref, const QJsonObject& argument, std::function<void(const QJsonObject& completion, const QString& error)> callback);
-    /// 设置服务端日志级别，发送 logging/setLevel 请求。@deprecated in 2026-07-28（logging 已移除）
+    /// 设置服务端日志级别，发送 logging/setLevel 请求。
+    /// @deprecated in 2026-07-28（logging/setLevel 已移除）；2026-07-28 下自动改用
+    ///             per-request logLevel（_meta.io.modelcontextprotocol/logLevel），建议直接使用 setRequestLogLevel()。
     bool setLoggingLevel(const QString& level, int timeoutMs = 5000);
+
+    /// MCP 2026-07-28 per-request logLevel（SEP-2577）：在后续每个请求的 _meta 注入
+    /// io.modelcontextprotocol/logLevel，服务端据此决定是否回传 notifications/message 日志。
+    /// 传空字符串停止注入。仅在 stateless / 2026-07-28 模式下生效。
+    void setRequestLogLevel(const QString& level);
+    QString requestLogLevel() const;
+
+    /// 设置 W3C trace context（分布式追踪）。可随时调用：立即更新后续 HTTP 请求头。
+    void setTraceContext(const McpTraceContext& ctx);
+    McpTraceContext traceContext() const;
 
     using TrafficLogger = std::function<void(const QJsonObject& event)>;
     void setTrafficLogger(TrafficLogger logger);
@@ -580,6 +610,9 @@ private:
     QString m_protocolVersion{QStringLiteral("2026-07-28")};
     bool m_statelessMode{false};
     int m_timeoutMs{10000};
+    QString m_requestLogLevel;  // 2026-07-28 per-request logLevel
+    McpTraceContext m_traceContext;  // W3C trace context（traceparent/tracestate/baggage）
+    std::shared_ptr<mcp::IMcpTransport> m_transport;  // 当前传输层引用（trace 头动态更新用）
 
     mcp::McpReconnectPolicy m_reconnectPolicy;
     class QTimer* m_reconnectTimer{nullptr};

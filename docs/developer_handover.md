@@ -118,8 +118,8 @@ src/
 | C4 | **WIF**（Workload Identity Federation） | 工作负载用平台 JWT 认证 | 依赖 C1 的 JWT 基础设施 |
 | C5 | **服务端角色** | 本项目是客户端 SDK，未实现 2026-07-28 服务端 | 全新领域，评估是否有必要 |
 | C6 | **MRTR sampling/roots 路径专项验证** | MRTR handler 可处理 sampling/createMessage，但 conformance 只验证了 elicitation | 写测试覆盖 sampling/roots 的 inputRequests |
-| C7 | **per-request logLevel** | `_meta.io.modelcontextprotocol/logLevel` 未注入（SHOULD 级） | McpClientSession 增加 logLevel 注入 |
-| C8 | **OpenTelemetry trace context** | traceparent/tracestate/baggage 未实现（可选保留键） | 传输层透传 |
+| C7 | **per-request logLevel** | ✅ 已实现：`_meta.io.modelcontextprotocol/logLevel` 注入（`McpClientSession::setLogLevel` + `McpQtClient::setRequestLogLevel`），`setLoggingLevel` 在 2026-07-28 下自动走新路径 | — |
+| C8 | **OpenTelemetry trace context** | ✅ 已实现：W3C trace context（traceparent/tracestate/baggage）经 `McpQtClient::setTraceContext` / Builder `setTraceContext` 注入每个 HTTP 请求 | — |
 | C9 | **JWT-Bearer grant** | 已知限制，client_assertion + ES256/RS256 签名未实现 | 影响 C2/C4；代码骨架已在 McpQtClient.cpp |
 | C10 | **`--suite all` 全量验证** | 只跑了 2026-07-28 过滤的 32 场景；extension 属性场景（dpop/wif-jwt/enterprise-managed-authorization）未跑 | 跑全量 + 补齐 extension handler |
 
@@ -150,7 +150,7 @@ src/
 3. 跑 `mcp_app_demo` 看端到端效果
 
 ### Phase 2：补协议缺口（按优先级）
-1. **C7 + C8**（低成本，SHOULD 项）—— 半天量
+1. ~~C7 + C8（低成本，SHOULD 项）—— 半天量~~ ✅ 已完成（2026-08-08）：per-request logLevel + W3C trace context
 2. **C6**（MRTR sampling/roots 测试）—— 半天量
 3. **C1 Tasks 扩展** —— 中等量级，独立模块
 4. **C9 JWT 签名基础设施** —— 解锁 C2/C4/C10

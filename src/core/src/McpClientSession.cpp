@@ -1605,6 +1605,12 @@ void McpClientSession::injectStatelessMeta(json& params) {
         meta["io.modelcontextprotocol/clientInfo"] = clientInfoObj;
         meta["capabilities"] = m_capabilities;
         meta["io.modelcontextprotocol/clientCapabilities"] = m_capabilities;
+
+        // 2026-07-28 per-request logLevel（SEP-2577）：客户端可选地声明希望接收的日志级别
+        if (!m_requestLogLevel.empty()) {
+            meta["logLevel"] = m_requestLogLevel;
+            meta["io.modelcontextprotocol/logLevel"] = m_requestLogLevel;
+        }
     }
 }
 
@@ -2021,6 +2027,16 @@ void McpClientSession::setProtocolVersion(const std::string& version) {
 void McpClientSession::setStatelessMode(bool enabled) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_statelessMode = enabled;
+}
+
+void McpClientSession::setLogLevel(const std::string& level) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_requestLogLevel = level;
+}
+
+std::string McpClientSession::getLogLevel() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_requestLogLevel;
 }
 
 bool McpClientSession::isStatelessMode() const {

@@ -311,8 +311,29 @@ bool alive = client->ping(5000);
 QJsonObject completion = client->complete(
     {{"name", "my_template"}, {"argument", {{"name", "p", "value", "te"}}}});
 
-// 设置服务端日志级别
+// 设置服务端日志级别（2026-07-28 下自动改用 per-request logLevel）
 bool ok = client->setLoggingLevel("debug");
+
+// 🌟 MCP 2026-07-28 per-request logLevel（SEP-2577）：
+// 在后续每个请求的 _meta 注入 io.modelcontextprotocol/logLevel，
+// 服务端据此决定是否在该请求响应流上回传 notifications/message 日志。
+// 传空字符串停止注入。仅 stateless / 2026-07-28 模式生效。
+client->setRequestLogLevel("debug");   // 启用，请求级别 debug
+client->setRequestLogLevel("");        // 停止注入
+
+// 🌟 W3C Trace Context（SEP-414 / W3C Trace-Context）：
+// 设置后 traceparent/tracestate/baggage 随每个 HTTP 请求发送，
+// 使 MCP 服务器 span 嵌套进调用方已有的分布式 trace。
+mcp_qt::McpTraceContext trace;
+trace.traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+trace.tracestate  = "congo=t61rcWkgMzE";
+trace.baggage     = "userId=alice";
+client->setTraceContext(trace);   // 可随时调用，立即更新后续请求头
+
+// Builder 中也可配置：
+McpQtClientBuilder builder;
+builder.setRequestLogLevel("info")
+       .setTraceContext(trace);
 
 // 流量追踪（调试用）
 client->setTrafficLogger([](const QJsonObject& event) {

@@ -258,3 +258,40 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
     TM_ASSERT_TRUE(toolCompleted, "tool completed after multi-round MRTR loop");
     TM_ASSERT_TRUE(capturedStates.size() == 2 && capturedStates[0] == "state-1" && capturedStates[1] == "state-2", "per-round requestState observed");
 }
+
+// MCP 2026-07-28 per-request logLevel（SEP-2577）注入验证
+void test_qt_stateless_session_log_level() {
+    auto mockTransport = std::make_shared<StatelessMockTransport>();
+    auto session = std::make_shared<mcp::McpClientSession>(mockTransport);
+    session->init();
+    session->start();
+    session->setStatelessMode(true);
+
+    // 默认：不注入 logLevel（服务端 MUST NOT 回传日志）
+    session->listTools([](const std::vector<mcp::McpTool>&, const nlohmann::json&) {});
+    auto req0 = nlohmann::json::parse(mockTransport->sentMessages.back());
+    TM_ASSERT_TRUE(!req0["params"]["_meta"].contains("io.modelcontextprotocol/logLevel"),
+                   "logLevel should NOT be injected by default");
+
+    // 设置 debug：注入规范全称键 + 短键
+    session->setLogLevel("debug");
+    session->listTools([](const std::vector<mcp::McpTool>&, const nlohmann::json&) {});
+    auto req1 = nlohmann::json::parse(mockTransport->sentMessages.back());
+    TM_ASSERT_TRUE(req1["params"]["_meta"].contains("io.modelcontextprotocol/logLevel"),
+                   "logLevel should be injected when set");
+    TM_ASSERT_TRUE(req1["params"]["_meta"]["io.modelcontextprotocol/logLevel"] == "debug",
+                   "logLevel full key value should be debug");
+    TM_ASSERT_TRUE(req1["params"]["_meta"]["logLevel"] == "debug",
+                   "logLevel short key should be injected");
+
+    // 清空：停止注入
+    session->setLogLevel("");
+    session->listTools([](const std::vector<mcp::McpTool>&, const nlohmann::json&) {});
+    auto req2 = nlohmann::json::parse(mockTransport->sentMessages.back());
+    TM_ASSERT_TRUE(!req2["params"]["_meta"].contains("io.modelcontextprotocol/logLevel"),
+                   "logLevel should be removed after clear");
+
+    // getLogLevel roundtrip
+    session->setLogLevel("warning");
+    TM_ASSERT_TRUE(session->getLogLevel() == "warning", "getLogLevel should return the configured level");
+}

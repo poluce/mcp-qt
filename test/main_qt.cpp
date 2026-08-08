@@ -26,10 +26,12 @@ void test_qt_transport_recovery();
 void test_qt_server_manager_router();
 void test_qt_stateless_http_transport_basic();
 void test_qt_stateless_http_transport_headers();
+void test_qt_stateless_http_transport_trace_headers();
 void test_multi_server_agent_diagnostics_groups_entries_by_stage();
 void test_qt_stateless_session_meta_injection();
 void test_qt_stateless_session_mrtr_loop();
 void test_qt_stateless_session_multi_round_mrtr_loop();
+void test_qt_stateless_session_log_level();
 void test_qt_highlevel_builder_and_signals();
 
 int main(int argc, char* argv[]) {
@@ -59,11 +61,13 @@ int main(int argc, char* argv[]) {
     TM_RUN_TEST(test_qt_transport_recovery);
     TM_RUN_TEST(test_qt_stateless_http_transport_basic);
     TM_RUN_TEST(test_qt_stateless_http_transport_headers);
+    TM_RUN_TEST(test_qt_stateless_http_transport_trace_headers);
     TM_RUN_TEST(test_qt_server_manager_router);
     TM_RUN_TEST(test_multi_server_agent_diagnostics_groups_entries_by_stage);
     TM_RUN_TEST(test_qt_stateless_session_meta_injection);
     TM_RUN_TEST(test_qt_stateless_session_mrtr_loop);
     TM_RUN_TEST(test_qt_stateless_session_multi_round_mrtr_loop);
+    TM_RUN_TEST(test_qt_stateless_session_log_level);
     TM_RUN_TEST(test_qt_highlevel_builder_and_signals);
 
     TmTestRunner::instance().printSummary();
