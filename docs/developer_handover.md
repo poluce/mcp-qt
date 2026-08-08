@@ -127,14 +127,14 @@ src/
 
 | 编号 | 项目 | 状态 | 建议方向 |
 |:---:|------|------|---------|
-| A1 | **AppBridge 工具调用代理** | App 经 postMessage 请求调 MCP 工具（tools/call 代理）未实现 | 在 setAppMessageHandler 里解析 ui/ 方法，转发到 McpQtClient::callToolAsync |
-| A2 | **权限策略细化** | `setPermissionPolicy` 目前是占位（只存参数） | 实现 allowedTools/allowedCapabilities 校验 + WebView2 Settings 权限 |
-| A3 | **更多 ui/ 方言方法** | 目前处理 ui/initialize；完整方言（ui/ 前缀方法、sendOpenLink 等）未覆盖 | 参考 ext-apps 规范补充 |
-| A4 | **ui:// 真实服务器端到端** | 目前只验证了本地 HTML / mock；未连真实 MCP Apps 服务器 | 找一个支持 MCP Apps 的服务器验证 |
-| A5 | **QCefView 后端** | IMcpAppRenderer 抽象已预留，未实现 | 跨平台需要时加（需 MSVC + Qt MSVC 包，已备） |
-| A6 | **跨平台渲染** | WebView2 仅 Windows | macOS（WKWebView）/Linux（WebKitGTK）后端 |
-| A7 | **自动化测试** | MCP Apps 无单元/端到端自动化测试（手动验证） | QtTest 单测 + 集成测试 |
-| A8 | **沙箱/CSP 细化** | WebView2 默认隔离，但 CSP、permissions 策略未细化 | 参考 MCP Apps 安全模型 |
+| A1 | **AppBridge 工具调用代理** | ✅ 已实现：`McpAppBridge`（tools/call、tools/list、resources/read 代理 + 响应回传） | — |
+| A2 | **权限策略细化** | ✅ 已实现：`McpAppBridge::setPermissionPolicy`（allowedTools/allowedCapabilities 校验 + `_meta.ui.visibility` 可见性过滤） | — |
+| A3 | **更多 ui/ 方言方法** | ✅ 已实现：ui/open-link、ui/message、ui/update-model-context、ui/request-display-mode（可自定义 handler） | — |
+| A4 | **ui:// 真实服务器端到端** | ⚠️ 待验证 | 找一个支持 MCP Apps 的服务器验证 |
+| A5 | **QCefView 后端** | ⚠️ IMcpAppRenderer 抽象已预留 | 跨平台需要时加（需 MSVC + Qt MSVC 包） |
+| A6 | **跨平台渲染** | ⚠️ WebView2 仅 Windows | macOS（WKWebView）/Linux（WebKitGTK）后端 |
+| A7 | **自动化测试** | ✅ 已补充：`test_qt_mcp_app_bridge.cpp`（7 用例，mock renderer/transport，无需 WebView2） | — |
+| A8 | **沙箱/CSP 细化** | ⚠️ WebView2 默认隔离，CSP/permissions 细化待做 | 参考 MCP Apps 安全模型 |
 
 ### 5.3 已知环境性/历史限制（非本分支回归）
 
@@ -156,9 +156,10 @@ src/
 4. **C9 JWT 签名基础设施** —— 解锁 C2/C4/C10
 
 ### Phase 3：完善 MCP Apps（按优先级）
-1. **A7 自动化测试** —— 建立回归保障
-2. **A1 工具调用代理 + A2 权限策略** —— 完整 AppBridge
-3. **A4 真实服务器端到端**
+1. ~~A7 自动化测试~~ ✅ 已完成（2026-08-08）：AppBridge 协议层 7 用例
+2. ~~A1 工具调用代理 + A2 权限策略~~ ✅ 已完成（2026-08-08）：McpAppBridge
+3. ~~A3 ui/ 方言方法~~ ✅ 已完成（2026-08-08）：open-link / message / update-model-context / request-display-mode
+4. **A4 真实服务器端到端**
 4. **A5/A6 跨平台后端**（按战略需要）
 
 ### Phase 4：扩展生态（可选）

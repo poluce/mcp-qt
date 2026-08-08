@@ -17,6 +17,7 @@ add_executable(tests_qt
     test_multi_server_agent_diagnostics.cpp
     test_qt_stateless_session.cpp
     test_qt_highlevel_stateless.cpp
+    test_qt_mcp_app_bridge.cpp
 )
 
 target_include_directories(tests_qt PRIVATE
@@ -26,11 +27,13 @@ target_include_directories(tests_qt PRIVATE
     ${CMAKE_SOURCE_DIR}/src/transport/include
     ${CMAKE_SOURCE_DIR}/src/transport/src
     ${CMAKE_SOURCE_DIR}/src/client/include
+    ${CMAKE_SOURCE_DIR}/src/apps/include
 )
 
 target_link_libraries(tests_qt PRIVATE
     mcp_qt_transport
     mcp_qt_client
+    mcp_qt_apps
     multi_server_agent_core
     Qt6::Core
     Qt6::Network

@@ -33,6 +33,13 @@ void test_qt_stateless_session_mrtr_loop();
 void test_qt_stateless_session_multi_round_mrtr_loop();
 void test_qt_stateless_session_log_level();
 void test_qt_highlevel_builder_and_signals();
+void test_qt_mcp_app_bridge_initialize();
+void test_qt_mcp_app_bridge_tools_list_filter();
+void test_qt_mcp_app_bridge_tools_call_permission_denied();
+void test_qt_mcp_app_bridge_tools_call_success();
+void test_qt_mcp_app_bridge_open_link();
+void test_qt_mcp_app_bridge_unknown_method();
+void test_qt_mcp_app_bridge_tools_call_visibility_denied();
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
@@ -69,6 +76,13 @@ int main(int argc, char* argv[]) {
     TM_RUN_TEST(test_qt_stateless_session_multi_round_mrtr_loop);
     TM_RUN_TEST(test_qt_stateless_session_log_level);
     TM_RUN_TEST(test_qt_highlevel_builder_and_signals);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_initialize);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_tools_list_filter);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_tools_call_permission_denied);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_tools_call_success);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_open_link);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_unknown_method);
+    TM_RUN_TEST(test_qt_mcp_app_bridge_tools_call_visibility_denied);
 
     TmTestRunner::instance().printSummary();
     return TmTestRunner::instance().hasFailed() ? 1 : 0;

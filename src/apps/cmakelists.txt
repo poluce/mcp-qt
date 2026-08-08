@@ -7,8 +7,10 @@ set(CMAKE_AUTOMOC ON)
 add_library(mcp_qt_apps STATIC
     include/mcp_qt_apps/McpAppSupport.h
     include/mcp_qt_apps/IMcpAppRenderer.h
+    include/mcp_qt_apps/McpAppBridge.h
     include/mcp_qt_apps/McpAppWebView2Renderer.h
     src/McpAppSupport.cpp
+    src/McpAppBridge.cpp
     src/McpAppWebView2Renderer.cpp
 )
 
@@ -27,6 +29,7 @@ target_compile_options(mcp_qt_apps PRIVATE
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 target_link_libraries(mcp_qt_apps PUBLIC
+    mcp_qt_client
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets

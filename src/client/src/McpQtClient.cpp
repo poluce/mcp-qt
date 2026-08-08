@@ -797,7 +797,7 @@ bool McpQtClient::hasPromptsCapability() const { return serverCapabilities().con
 bool McpQtClient::hasResourcesCapability() const { return serverCapabilities().contains("resources"); }
 
 // ========== Tools ==========
-static std::vector<McpQtTool> _cvt(const std::vector<mcp::McpTool>& src) { std::vector<McpQtTool> r; for(const auto& t:src){ r.push_back({QString::fromStdString(t.name), QString::fromStdString(t.description), _qj(t.inputSchema)}); } return r; }
+static std::vector<McpQtTool> _cvt(const std::vector<mcp::McpTool>& src) { std::vector<McpQtTool> r; for(const auto& t:src){ r.push_back({QString::fromStdString(t.name), QString::fromStdString(t.description), _qj(t.inputSchema), _qj(t.meta)}); } return r; }
 QString McpQtClient::stripNamespace(const QString& name) const {
     if (!m_namespace.isEmpty() && name.startsWith(m_namespace + QStringLiteral("__"))) {
         return name.mid(m_namespace.length() + 2);

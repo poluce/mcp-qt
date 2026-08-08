@@ -90,6 +90,7 @@ struct McpQtTool {
     QString name;
     QString description;
     QJsonObject inputSchema;
+    QJsonObject meta;  // 工具顶层 _meta（MCP Apps: ui.resourceUri / ui.visibility 等）
 };
 
 class McpQtClient;
