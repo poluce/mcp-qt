@@ -2162,6 +2162,17 @@ void McpQtClient::registerCapability(const QString& n,const QJsonObject& c){
     }
 }
 
+void McpQtClient::registerMcpAppCapabilities() {
+    // MCP Apps（io.modelcontextprotocol/ui）：声明支持 text/html;profile=mcp-app 渲染（SEP-2133）
+    QJsonObject caps = m_clientCapabilities.empty() ? QJsonObject{} : _qj(m_clientCapabilities);
+    QJsonObject uiCaps;
+    uiCaps[QStringLiteral("mimeTypes")] = QJsonArray{QStringLiteral("text/html;profile=mcp-app")};
+    QJsonObject ext = caps.value(QStringLiteral("extensions")).toObject();
+    ext[QStringLiteral("io.modelcontextprotocol/ui")] = uiCaps;
+    caps[QStringLiteral("extensions")] = ext;
+    setClientCapabilities(caps);
+}
+
 // ========== 生命周期 ==========
 bool McpQtClient::isConnected()const{return m_session&&m_session->state()==mcp::SessionState::Initialized;}
 void McpQtClient::close(int to){

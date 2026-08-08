@@ -479,6 +479,11 @@ public:
     void registerCapability(const QString& name, const QJsonObject& config);
     void setClientCapabilities(const QJsonObject& caps);
 
+    /// 注册 MCP Apps（io.modelcontextprotocol/ui）客户端能力声明：
+    /// 在 clientCapabilities.extensions 中声明支持渲染 text/html;profile=mcp-app。
+    /// 2026-07-28 扩展框架（SEP-2133）。渲染本身由 mcp_qt_apps 模块提供。
+    void registerMcpAppCapabilities();
+
     // ========== 生命周期与重连（对齐 TS `close()`）==========
 
     bool isConnected() const;
