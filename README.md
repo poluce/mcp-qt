@@ -359,13 +359,13 @@ QObject::connect(client.get(), &McpQtClient::reconnected, []{ qDebug() << "通�
     *   nlohmann/json 3.11.3（FetchContent 自动下载）
     *   WebView2 SDK 1.0.4129.50（`third_party/webview2`，MCP Apps 渲染）
     *   wil（`third_party/wil`，WebView2 兼容头）
-*   **Windows 额外依赖**：`bcrypt`（mcp_core，OAuth PKCE）；MCP Apps 需系统 Edge WebView2 Runtime（Win10/11 预装）
+*   **Windows 额外依赖**：`bcrypt`（mcp_core OAuth PKCE + mcp_qt_client ES256 JWT 签名）；MCP Apps 需系统 Edge WebView2 Runtime（Win10/11 预装）
 
 ---
 
 ## 已知限制
 
-*   **JWT-Bearer Grant Type**：暂不支持 `urn:ietf:params:oauth:grant-type:jwt-bearer`（影响旧场景 `auth/client-credentials-jwt`、`auth/cross-app-access-complete-flow`，2026-07-28 套件不涉及）
+*   **JWT-Bearer Grant Type**：✅ 已支持 **ES256（P-256）**（`private_key_pem` → RFC 7523 client assertion，Windows BCrypt / 非 Windows OpenSSL；`auth/client-credentials-jwt` conformance 已验证通过 8/8）；RS256 与 ECDSA P-384/P-521 未实现
 *   **OAuth 端点回退**：旧场景 `auth/2025-03-26-oauth-endpoint-fallback` 的早期 PRM 猜解回退未实现（已加入 `conformance-baseline.yml`）
 *   **MCP Apps 渲染**：默认后端为 WebView2（Windows）；当前 `ui://` 资源获取支持 HTTP/相对地址解析，复杂 AppBridge 能力（工具调用代理、权限策略细化）为可扩展预留
 *   **扩展生态**：Tasks（`io.modelcontextprotocol/tasks`）、EMA、DPoP、WIF 等扩展未实现（非核心协议 MUST）

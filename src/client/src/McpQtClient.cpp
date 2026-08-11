@@ -1,4 +1,5 @@
 #include "mcp_qt_client/McpQtClient.h"
+#include "mcp_qt_client/es256jwt.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include "mcp_core/McpClientSession.h"
@@ -186,10 +187,99 @@ static bool _dmQt(const QString& is,mcp::OAuthServerMetadata* o, bool* cidMetaSu
         if(cidMetaSupp && j.contains("client_id_metadata_document_supported") && j["client_id_metadata_document_supported"].is_boolean()) *cidMetaSupp = j["client_id_metadata_document_supported"].get<bool>(); return true;}catch(...){}}}}return false;
 }
 
+// OAuth 认证/刷新流程 RAII 锁（2026-09）：
+// - 同一时刻只允许一个 OAuth 流程（并发 401 时避免多个完整授权流程交错、互相覆盖 token）。
+// - 嵌套事件循环重入（同线程）不等待、不获取锁，调用方应直接放弃本次流程。
+// - 其它线程流程进行中时等待其结束；若其已产出有效 token 则直接复用，无需重跑。
+class OAuthFlowLock {
+public:
+    explicit OAuthFlowLock(std::shared_ptr<mcp::McpOAuthClient> oc) : m_oc(std::move(oc)) {
+        if (!m_oc) return;
+        if (m_oc->authFlowOwnerIsCurrentThread()) return;           // 重入：不获取
+        if (m_oc->tryAcquireAuthFlow()) { m_locked = true; return; }
+        // 其它线程进行中：等待结束或复用其产出的 token
+        while (m_oc->hasAuthFlowInProgress()) {
+            if (m_oc->hasValidToken()) return;                       // 复用成功
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        // 前序流程已结束：若已产出有效 token 直接复用，避免重跑完整授权
+        if (m_oc->hasValidToken()) return;
+        if (m_oc->tryAcquireAuthFlow()) m_locked = true;             // 前序失败，自己执行
+    }
+    ~OAuthFlowLock() {
+        if (m_locked && m_oc) m_oc->releaseAuthFlow();
+    }
+    /// true = 需要执行自己的 OAuth 流程
+    bool shouldRun() const { return m_locked; }
+    /// true = 其它流程已产出有效 token，可直接复用
+    bool canReuse() const { return m_oc && !m_locked && m_oc->hasValidToken(); }
+private:
+    std::shared_ptr<mcp::McpOAuthClient> m_oc;
+    bool m_locked{false};
+};
+
+// 用已有 refresh_token 通过 refresh_token grant（RFC 6749 §6）静默续期。
+// 仅在持有流程锁时调用。成功返回 true 并更新当前 token。
+static bool _refreshTokenQt(const std::string& tokenEndpoint,
+                            const std::string& clientId, const std::string& clientSecret,
+                            std::shared_ptr<mcp::McpOAuthClient> oc) {
+    if (!oc || tokenEndpoint.empty()) return false;
+    const auto cur = oc->getCurrentToken();
+    if (cur.refreshToken.empty()) return false;
+
+    QUrlQuery q;
+    q.addQueryItem("grant_type", "refresh_token");
+    q.addQueryItem("refresh_token", QString::fromStdString(cur.refreshToken));
+    q.addQueryItem("client_id", QString::fromStdString(clientId));
+    QMap<QByteArray, QByteArray> th;
+    if (!clientSecret.empty()) {
+        // client_secret_basic：凭据放 Authorization 头
+        th["Authorization"] = "Basic " + QByteArray::fromStdString(clientId + ":" + clientSecret).toBase64();
+    } else {
+        q.addQueryItem("client_secret", QString::fromStdString(clientSecret));
+    }
+    QByteArray resp = _postH(QString::fromStdString(tokenEndpoint),
+                             q.query(QUrl::FullyEncoded).toUtf8(), th);
+    auto rj = nlohmann::json::parse(resp.toStdString(), nullptr, false);
+    if (rj.is_discarded() || !rj.contains("access_token")) return false;
+    mcp::OAuthToken rt;
+    rt.accessToken = rj["access_token"].get<std::string>();
+    if (rj.contains("refresh_token") && rj["refresh_token"].is_string())
+        rt.refreshToken = rj["refresh_token"].get<std::string>();
+    if (rj.contains("expires_in") && rj["expires_in"].is_number_integer())
+        rt.expiresIn = rj["expires_in"].get<int>();
+    rt.obtainedAt = std::chrono::steady_clock::now();
+    oc->setCurrentToken(rt);
+    return true;
+}
+
+// token provider 辅助：返回当前 Bearer token。临近过期且可 refresh 时，
+// 在流程锁保护下主动静默续期（非阻塞：流程被占用时直接用当前 token，由 401 路径兜底）。
+static std::string _provideBearerToken(std::shared_ptr<mcp::McpOAuthClient> oc,
+                                       const std::string& clientId,
+                                       const std::string& clientSecret) {
+    auto tok = oc->getCurrentToken();
+    if (!tok.accessToken.empty() && tok.isExpiringSoon(30) && !tok.refreshToken.empty()) {
+        const std::string ep = oc->lastTokenEndpoint();
+        if (!ep.empty() && oc->tryAcquireAuthFlow()) {
+            _refreshTokenQt(ep, clientId, clientSecret, oc);
+            oc->releaseAuthFlow();
+            tok = oc->getCurrentToken();
+        }
+    }
+    return tok.accessToken;
+}
+
 // 完整 OAuth 认证（全 QNAM，无 libcurl）
 static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
                         const std::string& wwwAuth, std::shared_ptr<mcp::McpOAuthClient> oc,
                         const QString& redirectUri="http://localhost:3000/callback"){
+    // 流程互斥：防止并发 401 触发多个完整 OAuth 流程交错、覆盖 token。
+    OAuthFlowLock flowLock(oc);
+    if (!flowLock.shouldRun()) {
+        // 同线程重入（嵌套事件循环）或其它线程已产出有效 token：不再重复认证。
+        return flowLock.canReuse();
+    }
     std::cerr << "[OAuth] Starting OAuth flow for " << sseUrl << std::endl;
     std::string pu=_eRm(wwwAuth); nlohmann::json pj;
     // 1) PRM 发现（可选，失败则回退到直接 Metadata 发现）
@@ -217,6 +307,7 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
         if(!_dmQt(b,&mm,&cidMetaSupp)){std::cerr << "[OAuth] Direct metadata discovery failed" << std::endl;return false;}
     }
     std::cerr << "[OAuth] Metadata discovered, registration_endpoint: " << mm.registrationEndpoint << std::endl;
+    oc->setLastTokenEndpoint(mm.tokenEndpoint);  // 供发送前主动刷新使用
 
     // 3) 获取 client 凭据
     std::cerr << "[OAuth] Step 3: Getting client credentials" << std::endl;
@@ -251,6 +342,16 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
         cid = cidMetaSupp ? redirectUri.toStdString() : "mcp-qt-client";
     }
 
+    // 3.5) 已有 refresh_token → 优先用 refresh_token grant 静默续期（RFC 6749 §6），
+    //      避免重复完整授权（重新弹浏览器/新授权码）。失败（如 invalid_grant）则回退到下方完整流程。
+    if (!cid.empty() && !mm.tokenEndpoint.empty()) {
+        if (_refreshTokenQt(mm.tokenEndpoint, cid, csc, oc)) {
+            std::cerr << "[OAuth] Refreshed access token via refresh_token grant" << std::endl;
+            return true;
+        }
+        std::cerr << "[OAuth] refresh_token grant failed; falling back to full authorization" << std::endl;
+    }
+
     // 4) JWT-Bearer
     for(const auto& gt:mm.grantTypesSupported)if(gt=="urn:ietf:params:oauth:grant-type:jwt-bearer"&&ctx.contains("idp_id_token")&&!ctx["idp_id_token"].get<std::string>().empty()){
         std::string a=ctx["idp_id_token"].get<std::string>();
@@ -258,7 +359,7 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
         QMap<QByteArray,QByteArray> hdrs;
         if(!csc.empty()){hdrs["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();}
         QByteArray resp=_postH(QString::fromStdString(mm.tokenEndpoint),pf,hdrs);
-        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();oc->setCurrentToken(t);return true;}return false;
+        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();if(tj.contains("expires_in")&&tj["expires_in"].is_number_integer())t.expiresIn=tj["expires_in"].get<int>();if(tj.contains("refresh_token")&&tj["refresh_token"].is_string())t.refreshToken=tj["refresh_token"].get<std::string>();t.obtainedAt=std::chrono::steady_clock::now();oc->setCurrentToken(t);return true;}return false;
     }
 
     // 5) Client Credentials（当 context 有 client_id 且支持 client_credentials grant 时）
@@ -275,19 +376,52 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
         std::cerr << std::endl;
     }
     if(isCC){
-        std::cerr << "[OAuth] Using Client Credentials grant" << std::endl;
         if(hasPrivateKey){
-            // JWT-Bearer grant type
+            // private_key_jwt client authentication（RFC 7523 §2.1/§2.2，SEP-1046）：
+            // grant 仍是 client_credentials，私钥签发的 client assertion 放在
+            // client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+            // + client_assertion=<jwt>，用于认证客户端身份。
             std::string signingAlg = ctx.value("signing_algorithm","ES256");
-            std::cerr << "[OAuth] Using JWT-Bearer with " << signingAlg << std::endl;
-            // TODO: 生成 JWT assertion
-            // 目前先尝试 client_credentials
+            std::cerr << "[OAuth] Using client_credentials with private_key_jwt (" << signingAlg << ")" << std::endl;
+            if(signingAlg != "ES256"){
+                std::cerr << "[OAuth] Unsupported signing_algorithm for private_key_jwt: '"
+                          << signingAlg << "' (only ES256 supported)" << std::endl;
+                return false;
+            }
+            // RFC 7523 §3：client assertion 的 aud 应为授权服务器标识（issuer），
+            // 而非 token endpoint——部分服务器（含 conformance）只接受 issuer。
+            // issuer 缺失时回退 token endpoint 保持宽松兼容。
+            const std::string jwtAud = !mm.issuer.empty() ? mm.issuer : mm.tokenEndpoint;
+            std::string assertion, jwtErr;
+            if(!mcp_qt::jwt::buildEs256ClientAssertion(
+                   ctx["private_key_pem"].get<std::string>(), cid, jwtAud,
+                   assertion, &jwtErr)){
+                std::cerr << "[OAuth] JWT client assertion generation failed: "
+                          << jwtErr << std::endl;
+                return false;
+            }
+            std::cerr << "[OAuth] client_assertion ready (aud=" << jwtAud << ")" << std::endl;
+            QByteArray pf=QByteArray(
+                "grant_type=client_credentials"
+                "&client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+                "&client_assertion=")
+                + QUrl::toPercentEncoding(QString::fromStdString(assertion))
+                + "&resource="+QUrl::toPercentEncoding(QString::fromStdString(sseUrl));
+            QMap<QByteArray,QByteArray> hdrs;
+            if(!csc.empty()){hdrs["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();}
+            QByteArray resp=_postH(QString::fromStdString(mm.tokenEndpoint),pf,hdrs);
+            auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);
+            if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();if(tj.contains("expires_in")&&tj["expires_in"].is_number_integer())t.expiresIn=tj["expires_in"].get<int>();if(tj.contains("refresh_token")&&tj["refresh_token"].is_string())t.refreshToken=tj["refresh_token"].get<std::string>();t.obtainedAt=std::chrono::steady_clock::now();oc->setCurrentToken(t);return true;}
+            std::cerr << "[OAuth] private_key_jwt token exchange failed: "
+                      << resp.toStdString().substr(0, 200) << std::endl;
+            return false;
         }
+        std::cerr << "[OAuth] Using Client Credentials grant" << std::endl;
         QByteArray pf=QByteArray::fromStdString("grant_type=client_credentials&client_id="+cid+"&client_secret="+csc)+"&resource="+QUrl::toPercentEncoding(QString::fromStdString(sseUrl));
         QMap<QByteArray,QByteArray> hdrs;
         if(!csc.empty()){hdrs["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();}
         QByteArray resp=_postH(QString::fromStdString(mm.tokenEndpoint),pf,hdrs);
-        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();oc->setCurrentToken(t);return true;}return false;
+        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();if(tj.contains("expires_in")&&tj["expires_in"].is_number_integer())t.expiresIn=tj["expires_in"].get<int>();if(tj.contains("refresh_token")&&tj["refresh_token"].is_string())t.refreshToken=tj["refresh_token"].get<std::string>();t.obtainedAt=std::chrono::steady_clock::now();oc->setCurrentToken(t);return true;}return false;
     }
 
     // 6) Authorization Code + PKCE
@@ -528,7 +662,7 @@ McpQtClient::Ptr McpQtClient::connectWithOAuthAndWait(const OAuthConfig& oa,cons
     auto c=Ptr(new McpQtClient());
     auto t=std::make_shared<mcp_qt::QtHttpSseTransport>(oa.serverUrl.toStdString());
     auto oc=c->m_oauth;
-    t->setTokenProvider([oc]{return oc->getCurrentToken().accessToken;});
+    t->setTokenProvider([oc, oa]{return _provideBearerToken(oc, oa.clientId.toStdString(), oa.clientSecret.toStdString());});
     // 通过 transport 的 auth retry handler 触发 OAuth（收到 POST 401 时才执行）
     t->setAuthRetryHandler([oc,oa](const std::string& wa)->bool{
         nlohmann::json ctx;
@@ -2791,7 +2925,7 @@ McpQtClient::Ptr McpQtClient::connectWithOAuthAsync(const OAuthConfig& oa, const
     auto c = Ptr(new McpQtClient());
     auto t = std::make_shared<mcp_qt::QtHttpSseTransport>(oa.serverUrl.toStdString());
     auto oc = c->m_oauth;
-    t->setTokenProvider([oc]{return oc->getCurrentToken().accessToken;});
+    t->setTokenProvider([oc, oa]{return _provideBearerToken(oc, oa.clientId.toStdString(), oa.clientSecret.toStdString());});
     t->setAuthRetryHandler([oc, oa](const std::string& wa)->bool{
         nlohmann::json ctx;
         if(!oa.clientId.isEmpty()) ctx["client_id"] = oa.clientId.toStdString();

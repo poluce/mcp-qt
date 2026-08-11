@@ -1,4 +1,4 @@
 client:
-  - auth/client-credentials-jwt
+  - auth/enterprise-managed-authorization
   - auth/cross-app-access-complete-flow
   - auth/2025-03-26-oauth-endpoint-fallback

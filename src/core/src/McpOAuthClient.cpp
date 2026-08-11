@@ -285,6 +285,11 @@ OAuthToken McpOAuthClient::getCurrentToken() const {
 void McpOAuthClient::setCurrentToken(const OAuthToken& token) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentToken = token;
+    // 2026-09: token 带 issuer 时同步更新按 issuer 键控的持久化存储，
+    // 避免 setCurrentToken / setStoredTokenForIssuer 双写不一致（旧 token 残留）。
+    if (!token.issuer.empty()) {
+        m_tokensByIssuer[token.issuer] = token;
+    }
 }
 
 bool McpOAuthClient::hasValidToken() const {
@@ -330,6 +335,44 @@ OAuthToken McpOAuthClient::getTokenForIssuer(const std::string& issuer) const {
 void McpOAuthClient::setStoredTokenForIssuer(const std::string& issuer, const OAuthToken& token) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_tokensByIssuer[issuer] = token;
+}
+
+// ============================================================================
+// 认证/刷新流程互斥（2026-09: 防止并发 401 触发多个 OAuth 流程互相覆盖 token）
+// ============================================================================
+
+bool McpOAuthClient::tryAcquireAuthFlow() {
+    std::lock_guard<std::mutex> lock(m_authFlowMutex);
+    if (m_authFlowActive) return false;
+    m_authFlowActive = true;
+    m_authFlowOwner = std::this_thread::get_id();
+    return true;
+}
+
+void McpOAuthClient::releaseAuthFlow() {
+    std::lock_guard<std::mutex> lock(m_authFlowMutex);
+    m_authFlowActive = false;
+    m_authFlowOwner = std::thread::id{};
+}
+
+bool McpOAuthClient::hasAuthFlowInProgress() const {
+    std::lock_guard<std::mutex> lock(m_authFlowMutex);
+    return m_authFlowActive;
+}
+
+bool McpOAuthClient::authFlowOwnerIsCurrentThread() const {
+    std::lock_guard<std::mutex> lock(m_authFlowMutex);
+    return m_authFlowActive && m_authFlowOwner == std::this_thread::get_id();
+}
+
+void McpOAuthClient::setLastTokenEndpoint(const std::string& ep) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_lastTokenEndpoint = ep;
+}
+
+std::string McpOAuthClient::lastTokenEndpoint() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_lastTokenEndpoint;
 }
 
 bool McpOAuthClient::validateAuthorizationIss(const std::string& authorizationResponseUrlOrQuery,

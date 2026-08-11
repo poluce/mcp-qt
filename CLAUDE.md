@@ -167,7 +167,9 @@ mcp_qt_client (整合层, QObject 信号/槽)
 
 已修复：`sse-retry`（Race Condition 缓冲队列 + 冷却型探活机制）
 警告：`auth/basic-cimd`（1 个非致命警告）、`elicitation-sep1034-client-defaults`（并发假报错）
-真实失败：`auth/client-credentials-jwt`、`auth/cross-app-access-complete-flow`（JWT assertion 签名未实现）、`auth/2025-03-26-oauth-endpoint-fallback`（已加入 baseline 忽略清单）
+真实失败：`auth/cross-app-access-complete-flow`（EMA 完整流程：token exchange + jwt-bearer grant，归 C2 扩展，见 docs/缺失功能清单.md）、`auth/2025-03-26-oauth-endpoint-fallback`（已加入 baseline 忽略清单）
+
+> 注：`auth/client-credentials-jwt` 已于 2026-08-11 复测通过（ES256 实现，8/8），从真实失败列表中移除。
 
 ## 依赖项
 

@@ -18,6 +18,7 @@ add_executable(tests_qt
     test_qt_stateless_session.cpp
     test_qt_highlevel_stateless.cpp
     test_qt_mcp_app_bridge.cpp
+    test_es256_jwt.cpp
 )
 
 target_include_directories(tests_qt PRIVATE

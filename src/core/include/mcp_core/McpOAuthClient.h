@@ -3,6 +3,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <thread>
 #include <chrono>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -211,6 +212,22 @@ public:
     OAuthToken getTokenForIssuer(const std::string& issuer) const;
     void setStoredTokenForIssuer(const std::string& issuer, const OAuthToken& token);
 
+    // ===== 认证/刷新流程互斥（2026-09: 防止并发 401 触发多个 OAuth 流程）=====
+    /// 尝试获取认证/刷新流程权。成功返回 true，流程结束后必须调用 releaseAuthFlow()。
+    /// 失败（有其它流程进行中，包括当前线程重入）返回 false。
+    bool tryAcquireAuthFlow();
+    /// 释放认证/刷新流程权。
+    void releaseAuthFlow();
+    /// 是否有认证/刷新流程正在进行（跨线程轮询用）。
+    bool hasAuthFlowInProgress() const;
+    /// 当前线程是否是流程持有者（用于检测嵌套事件循环导致的同线程重入）。
+    bool authFlowOwnerIsCurrentThread() const;
+
+    /// 记录最近一次成功发现并使用的 token endpoint（供发送前主动刷新使用）。
+    void setLastTokenEndpoint(const std::string& ep);
+    /// 读取最近记录的 token endpoint。
+    std::string lastTokenEndpoint() const;
+
 private:
     static std::string generateCodeVerifier();
     static std::string computeCodeChallenge(const std::string& verifier);
@@ -224,6 +241,13 @@ private:
     OAuthClientRegistration m_registration;
     OAuthServerMetadata m_metadata;
     std::vector<std::string> m_requestedScopes;  // SEP-2350: 已请求的 scope 集合
+
+    // 认证/刷新流程互斥状态（独立于 m_mutex，避免与 token 读写互相阻塞）
+    mutable std::mutex m_authFlowMutex;
+    std::thread::id m_authFlowOwner;
+    bool m_authFlowActive{false};
+
+    std::string m_lastTokenEndpoint;  // 最近一次发现的 token endpoint
 };
 
 } // namespace mcp

@@ -40,6 +40,12 @@ void test_qt_mcp_app_bridge_tools_call_success();
 void test_qt_mcp_app_bridge_open_link();
 void test_qt_mcp_app_bridge_unknown_method();
 void test_qt_mcp_app_bridge_tools_call_visibility_denied();
+void test_es256_jwt_derive_public_key_matches_rfc6979();
+void test_es256_jwt_pkcs8_build_and_verify();
+void test_es256_jwt_sec1_build_and_verify();
+void test_es256_jwt_tamper_detected();
+void test_es256_jwt_invalid_pem_rejected();
+void test_es256_jwt_claims_times_and_jti();
 
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
@@ -83,6 +89,12 @@ int main(int argc, char* argv[]) {
     TM_RUN_TEST(test_qt_mcp_app_bridge_open_link);
     TM_RUN_TEST(test_qt_mcp_app_bridge_unknown_method);
     TM_RUN_TEST(test_qt_mcp_app_bridge_tools_call_visibility_denied);
+    TM_RUN_TEST(test_es256_jwt_derive_public_key_matches_rfc6979);
+    TM_RUN_TEST(test_es256_jwt_pkcs8_build_and_verify);
+    TM_RUN_TEST(test_es256_jwt_sec1_build_and_verify);
+    TM_RUN_TEST(test_es256_jwt_tamper_detected);
+    TM_RUN_TEST(test_es256_jwt_invalid_pem_rejected);
+    TM_RUN_TEST(test_es256_jwt_claims_times_and_jti);
 
     TmTestRunner::instance().printSummary();
     return TmTestRunner::instance().hasFailed() ? 1 : 0;
