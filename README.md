@@ -155,8 +155,8 @@ cd build && ctest
 # 或直接运行单个测试
 ./build/test/tests_qt testToolsModel
 
-# MCP Apps 演示（WebView2）
-./build/examples/mcp_app_demo/mcp_app_demo
+# 主示例：多服务器 Agent + MCP Apps 渲染（WebView2）
+./build/examples/multi_server_agent/multi_server_agent
 ```
 
 > **WebView2 依赖**：Windows 10/11 系统预装 Edge WebView2 Runtime；SDK 头文件与 `WebView2Loader.dll` 已纳入 `third_party/webview2`（构建时自动复制到可执行文件旁）。
@@ -195,9 +195,8 @@ mcp-qt/
  ├── test/                           # Qt Test 框架单元/集成测试
  ├── third_party/                    # WebView2 SDK + wil
  └── examples/
-      ├── multi_server_agent/        # 完整 GUI 应用：多服务器聚合 + LLM Agent
-      ├── anysearch_qt/              # 轻量搜索客户端示例
-      └── mcp_app_demo/              # MCP Apps 端到端演示（WebView2 渲染 + 互通）
+      ├── multi_server_agent/        # 完整 GUI 应用：多服务器聚合 + ReAct Agent + MCP Apps 渲染（WebView2）
+      └── anysearch_qt/              # 轻量搜索客户端示例
 ```
 
 > **💡 关于实战验证**：
@@ -228,7 +227,7 @@ mcp-qt/
 
 ### 3. `examples`：端到端业务与集成实战 (End-to-End Examples)
 **“造出来的车究竟好不好开？”**
-- **代表作**：`examples/multi_server_agent`、`examples/mcp_app_demo`
+- **代表作**：`examples/multi_server_agent`（多服务器聚合 + ReAct Agent + MCP Apps 渲染）
 - **核心职责**：将最真实、最极限的环境融合在一起进行测试（真实网络、多语言服务、多协议并发、UI 多线程压测、Agent 调度闭环、MCP Apps 渲染互通）。
 
 **💡 测试体系总结**：

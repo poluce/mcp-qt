@@ -1,3 +1,2 @@
 add_subdirectory(anysearch_qt)
 add_subdirectory(multi_server_agent)
-add_subdirectory(mcp_app_demo)

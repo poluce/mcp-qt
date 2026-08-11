@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <iostream>
 #include <QDateTime>
+#include "mcp_qt_apps/McpAppSupport.h"
 
 namespace mcp_agent {
 
@@ -132,6 +133,15 @@ void LlmAgentExecutor::nextStep(
             }
 
             m_toolDispatcher(dec.toolName, dec.toolArguments, [this, dec, availableTools, onFinish](mcp_qt::McpResult res) {
+                // MCP Apps：工具返回 text/html;profile=mcp-app 内容 → 交给宿主内嵌渲染
+                const QString appMime = QString::fromUtf8(mcp_qt::kMcpAppMimeType);
+                for (const auto& c : res.contents) {
+                    if (c.mimeType == appMime && !c.text.isEmpty()) {
+                        emit mcpAppContentAvailable(c.text, dec.toolName);
+                        break;
+                    }
+                }
+
                 QString obs;
                 if (res.isError) {
                     obs = "Error: " + res.errorString;

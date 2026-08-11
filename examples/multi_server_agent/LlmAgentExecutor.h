@@ -47,6 +47,8 @@ public:
 
 signals:
     void stepProgress(const QString& type, const QString& content);
+    /// 工具返回 MCP Apps UI 内容（text/html;profile=mcp-app），供宿主内嵌 WebView2 渲染。
+    void mcpAppContentAvailable(const QString& html, const QString& toolName);
 
 private:
     void nextStep(

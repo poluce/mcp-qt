@@ -76,6 +76,11 @@ function processMcpRequest(request) {
     }
   } else if (method === 'tools/call') {
     resp.result = { content: [{ type: 'text', text: 'dashboard rendered (mock)' }] };
+    // MCP Apps 演示：额外返回 text/html;profile=mcp-app 嵌入式资源，宿主据此内嵌渲染
+    resp.result.content.push({
+      type: 'embeddedResource',
+      resource: { text: APP_HTML, mimeType: 'text/html;profile=mcp-app' }
+    });
   } else {
     resp.error = { code: -32601, message: `Method not found: ${method}` };
   }

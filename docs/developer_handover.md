@@ -65,8 +65,8 @@ npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client \
   --command "build\conformance_runner_qt\mcp_client_conformance_qt.exe" \
   --scenario request-metadata --spec-version 2026-07-28
 
-# MCP Apps 演示
-./build/examples/mcp_app_demo/mcp_app_demo
+# 主示例（多服务器 Agent + MCP Apps 渲染）
+./build/examples/multi_server_agent/multi_server_agent
 ```
 
 ## 3. 代码架构导航
@@ -137,7 +137,7 @@ src/
 | A5 | **QCefView 后端** | ⛔ 暂不实现（2026-08-11 用户决定，不纳入范围） | `IMcpAppRenderer` 抽象已预留 |
 | A6 | **跨平台渲染** | ⛔ 暂不实现（2026-08-11 用户决定，不纳入范围） | WebView2 仅 Windows；其它平台需对应后端 |
 | A7 | **自动化测试** | ✅ 已补充：`test_qt_mcp_app_bridge.cpp`（7 用例，mock renderer/transport，无需 WebView2） | — |
-| A8 | **沙箱/CSP 细化** | ✅ 已实现（2026-08-11）：双 iframe 沙箱代理 + CSP + permissions→allow + initialized 门禁 + size-changed + WebView2 权限授予 + hostContext + displayMode 协商 + appLogMessage + teardown 等待 + CSP 审计 + 沙箱边界 + 外部域检测 + prefersBorder/domain + hashHtml + 加载看门狗 + **资源限制（内存监控）+ 哈希 allowlist + 未声明域警告 UI**，单测 + `mcp_app_demo` 端到端 + **A4 端到端（`tests_qt_apps_e2e`，官方 `server-threejs` 联调通过）** 验证通过 | 剩余：A5/A6 跨平台渲染（受平台限制） |
+| A8 | **沙箱/CSP 细化** | ✅ 已实现（2026-08-11）：双 iframe 沙箱代理 + CSP + permissions→allow + initialized 门禁 + size-changed + WebView2 权限授予 + hostContext + displayMode 协商 + appLogMessage + teardown 等待 + CSP 审计 + 沙箱边界 + 外部域检测 + prefersBorder/domain + hashHtml + 加载看门狗 + **资源限制（内存监控）+ 哈希 allowlist + 未声明域警告 UI**，单测 + `multi_server_agent` 端到端 + **A4 端到端（`tests_qt_apps_e2e`，官方 `server-threejs` 联调通过）** 验证通过 | 剩余：A5/A6 跨平台渲染（受平台限制） |
 
 ### 5.3 已知环境性/历史限制（非本分支回归）
 
@@ -150,7 +150,7 @@ src/
 ### Phase 1：熟悉（1-3 天）
 1. 读本文档 + docs/API_REFERENCE.md + docs/MCP_2026-07-28_规范对照审计.md
 2. 按 §2 搭环境，跑通 §2.4 全部测试
-3. 跑 `mcp_app_demo` 看端到端效果
+3. 跑 `multi_server_agent`（多服务器 + MCP Apps 渲染）看端到端效果
 
 ### Phase 2：补协议缺口（按优先级）
 1. ~~C7 + C8（低成本，SHOULD 项）—— 半天量~~ ✅ 已完成（2026-08-08）：per-request logLevel + W3C trace context
@@ -193,7 +193,7 @@ chore:     杂项
 - [ ] `tests_qt` 27/27 通过
 - [ ] 2026-07-28 conformance 关键场景回归（request-metadata / sep-2322 / http-standard-headers / auth/iss-supported）
 - [ ] 旧场景 spot check（initialize / tools_call 2025-11-25）
-- [ ] `mcp_app_demo` 运行验证（若涉及 MCP Apps）
+- [ ] `multi_server_agent` 运行验证（若涉及 MCP Apps）
 - [ ] 工作区干净，无杂散文件
 
 ### 7.4 团队协作

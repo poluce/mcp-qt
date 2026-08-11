@@ -8,11 +8,6 @@
             "type": "sse",
             "url": "https://api.anysearch.com/mcp"
         },
-        "stateless-http-demo": {
-            "type": "stateless_http",
-            "url": "http://127.0.0.1:8080/mcp",
-            "protocolVersion": "2026-07-28"
-        },
         "context7": {
             "args": [
                 "-y",
@@ -43,6 +38,10 @@
             ],
             "command": "npx.cmd"
         },
+        "mcp-apps-mock": {
+            "type": "sse",
+            "url": "http://127.0.0.1:9123/mcp"
+        },
         "memory": {
             "args": [
                 "-y",
@@ -62,6 +61,11 @@
                 "@playwright/mcp"
             ],
             "command": "npx.cmd"
+        },
+        "stateless-http-demo": {
+            "protocolVersion": "2026-07-28",
+            "type": "stateless_http",
+            "url": "http://127.0.0.1:8080/mcp"
         }
     }
 }

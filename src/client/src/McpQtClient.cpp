@@ -82,7 +82,7 @@ static QList<McpContent> parseMcpContents(const QJsonObject& raw, bool& decoding
                     decodingError = true;
                 }
             }
-        } else if (type == QStringLiteral("resource")) {
+        } else if (type == QStringLiteral("resource") || type == QStringLiteral("embeddedResource")) {
             content.kind = McpContentKind::EmbeddedResource;
             QJsonObject resObj = item.value("resource").toObject();
             if (!resObj.isEmpty()) {

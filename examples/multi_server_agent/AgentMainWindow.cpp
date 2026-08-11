@@ -2,6 +2,7 @@
 #include "LlmBackends.h"
 
 #include <mcp_qt_client/McpJsonConfigLoader.h>
+#include <mcp_qt_client/McpToolRouter.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -16,6 +17,8 @@
 #include <QNetworkReply>
 #include <QProgressDialog>
 #include <QDialog>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <iostream>
 
@@ -82,9 +85,10 @@ AgentMainWindow::AgentMainWindow(QWidget* parent)
 {
     m_network = new QNetworkAccessManager(this);
     m_host = new mcp_qt::McpHost(this); // 🌟 初始化全局单例 m_host
-    
+
     initUi();
     applyTheme();
+    setupMcpAppRenderer();
 
     // 默认搜寻本地配置文件，提供极佳体验
     QString defaultCfg = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../examples/multi_server_agent/examples_config.json");
@@ -285,15 +289,31 @@ void AgentMainWindow::initUi() {
     leftLayout->addWidget(m_serverLogConsole);
     displayLayout->addLayout(leftLayout, 1);
 
-    // 右侧：ReAct 执行看板
-    auto* rightLayout = new QVBoxLayout();
+    // 右侧：QSplitter 分屏（ReAct 执行看板 + MCP App 渲染）
+    m_rightSplitter = new QSplitter(Qt::Vertical, this);
+
+    auto* blackboardBox = new QWidget(this);
+    auto* bbLayout = new QVBoxLayout(blackboardBox);
+    bbLayout->setContentsMargins(0, 0, 0, 0);
     auto* blackboardLabel = new QLabel(QStringLiteral("ReAct 执行过程看板:"), this);
     m_logBlackboard = new QTextEdit(this);
     m_logBlackboard->setReadOnly(true);
     m_logBlackboard->setHtml(QStringLiteral("<h3 style='color: #8e8e93; font-family: Segoe UI, Microsoft YaHei;'>系统空闲中。请在下方输入您的任务指令并点击启动...</h3>"));
-    rightLayout->addWidget(blackboardLabel);
-    rightLayout->addWidget(m_logBlackboard);
-    displayLayout->addLayout(rightLayout, 3);
+    bbLayout->addWidget(blackboardLabel);
+    bbLayout->addWidget(m_logBlackboard);
+    m_rightSplitter->addWidget(blackboardBox);
+
+    // MCP App 渲染容器（默认隐藏，工具返回 MCP Apps UI 时展开）
+    m_mcpAppContainer = new QWidget(this);
+    auto* appLayout = new QVBoxLayout(m_mcpAppContainer);
+    appLayout->setContentsMargins(0, 0, 0, 0);
+    auto* appLabel = new QLabel(QStringLiteral("MCP App 渲染（工具返回的交互界面）:"), this);
+    appLayout->addWidget(appLabel);
+    m_rightSplitter->addWidget(m_mcpAppContainer);
+    m_rightSplitter->setStretchFactor(0, 3);
+    m_rightSplitter->setStretchFactor(1, 2);
+    m_mcpAppContainer->hide();
+    displayLayout->addWidget(m_rightSplitter, 3);
 
     mainLayout->addLayout(displayLayout, 1);
 
@@ -342,78 +362,173 @@ void AgentMainWindow::initUi() {
 }
 
 void AgentMainWindow::applyTheme() {
-    // 高雅浅色现代纸张感主题 (Modern Light Theme)
+    // 现代浅色主题 (Modern Light)：统一色板、卡片圆角、hover 反馈、清晰层级
     QString qss = R"(
-        QMainWindow {
+        QMainWindow, QWidget {
             background-color: #f5f7fa;
+            color: #1f2329;
+            font-family: "Segoe UI", "Microsoft YaHei";
         }
         QLabel {
-            color: #2c3e50;
-            font-family: "Segoe UI", "Microsoft YaHei";
+            color: #30343a;
             font-size: 12px;
-            font-weight: bold;
+            font-weight: 600;
         }
-        QLineEdit {
+        QLineEdit, QComboBox, QTextEdit, QListWidget {
             background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.15);
-            border-radius: 5px;
+            border: 1px solid #d8dde3;
+            border-radius: 6px;
             padding: 6px;
-            color: #2c3e50;
-            font-family: "Segoe UI", "Microsoft YaHei";
+            color: #1f2329;
+            selection-background-color: #dbeafe;
+            selection-color: #1f2329;
         }
-        QLineEdit:focus {
-            border: 1px solid #007aff;
+        QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
+            border: 1px solid #3b82f6;
         }
-        QLineEdit:disabled {
-            background-color: #e9ecef;
-            color: #adb5bd;
-            border: 1px solid rgba(0, 0, 0, 0.08);
+        QLineEdit:disabled, QComboBox:disabled {
+            background-color: #eef1f4;
+            color: #9aa2ab;
         }
-        QComboBox {
-            background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.15);
-            border-radius: 5px;
-            padding: 6px;
-            color: #2c3e50;
-            min-width: 150px;
+        QComboBox::drop-down {
+            border: none;
+            width: 22px;
         }
         QPushButton {
-            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #007aff, stop:1 #0056b3);
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 5px;
+            background-color: #3b82f6;
+            border: none;
+            border-radius: 6px;
             color: #ffffff;
-            padding: 6px 14px;
-            font-family: "Segoe UI", "Microsoft YaHei";
-            font-weight: bold;
+            padding: 7px 16px;
+            font-weight: 600;
         }
         QPushButton:hover {
-            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1485ff, stop:1 #0066d6);
+            background-color: #2f74e0;
         }
         QPushButton:pressed {
-            background-color: #004085;
+            background-color: #2563eb;
         }
         QPushButton:disabled {
-            background-color: #ced4da;
-            color: #6c757d;
-            border: 1px solid rgba(0, 0, 0, 0.05);
+            background-color: #d3d9df;
+            color: #8a929b;
+        }
+        QPushButton[secondary="true"] {
+            background-color: #6b7280;
+        }
+        QPushButton[secondary="true"]:hover {
+            background-color: #5b6470;
         }
         QListWidget {
-            background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 6px;
-            color: #2c3e50;
-            padding: 5px;
-            font-family: "Segoe UI", "Microsoft YaHei";
+            padding: 4px;
+        }
+        QListWidget::item {
+            padding: 6px;
+            border-radius: 4px;
+        }
+        QListWidget::item:hover {
+            background-color: #eef2f7;
+        }
+        QListWidget::item:selected {
+            background-color: #dbeafe;
+            color: #1f2329;
         }
         QTextEdit {
-            background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 6px;
-            color: #2c3e50;
-            padding: 12px;
+            padding: 8px;
+        }
+        QSplitter::handle {
+            background-color: #e2e6ea;
+        }
+        QSplitter::handle:vertical {
+            height: 2px;
+        }
+        QScrollBar:vertical {
+            background: transparent;
+            width: 10px;
+        }
+        QScrollBar::handle:vertical {
+            background: #c9cfd6;
+            border-radius: 5px;
+            min-height: 30px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #adb5bd;
         }
     )";
     setStyleSheet(qss);
+}
+
+// ========== MCP Apps 渲染（内嵌 WebView2 + AppBridge）==========
+void AgentMainWindow::setupMcpAppRenderer() {
+    if (m_mcpAppRenderer || !m_mcpAppContainer) return;
+    m_mcpAppRenderer = new mcp_qt::McpAppWebView2Renderer(m_mcpAppContainer);
+    m_mcpAppRenderer->setUiMeta(QJsonObject{});  // 无 csp/permissions 声明 → 限制性默认
+
+    m_mcpAppBridge = std::make_shared<mcp_qt::McpAppBridge>();
+    m_mcpAppBridge->attach(m_mcpAppRenderer, nullptr);  // 占位（渲染具体 App 时替换为该服务器 client）
+    m_mcpAppBridge->setHostInfo(QStringLiteral("mcp-qt-multi-agent"), QStringLiteral("1.0.0"));
+    m_mcpAppBridge->setOpenLinkHandler([](const QJsonObject& params, mcp_qt::McpAppBridge::UiRequestRespond respond) {
+        const QUrl url(params.value(QStringLiteral("url")).toString());
+        if (!QDesktopServices::openUrl(url)) {
+            respond(QJsonObject{}, -1, QStringLiteral("open link failed"));
+            return;
+        }
+        respond(QJsonObject{}, 0, QString());
+    });
+    m_mcpAppBridge->setDisplayModes({QStringLiteral("inline"), QStringLiteral("fullscreen")});
+    m_mcpAppBridge->start();
+
+    if (auto* appLayout = m_mcpAppContainer->layout()) {
+        appLayout->addWidget(m_mcpAppRenderer->hostWidget());
+    }
+
+    // displayMode 协商通过 → 窗口全屏/普通切换
+    connect(m_mcpAppBridge.get(), &mcp_qt::McpAppBridge::displayModeChanged, this, [this](const QString& mode) {
+        if (mode == QLatin1String("fullscreen")) this->showFullScreen();
+        else if (mode == QLatin1String("inline")) this->showNormal();
+    });
+    // size-changed → 弹性尺寸调整 App 面板
+    connect(m_mcpAppBridge.get(), &mcp_qt::McpAppBridge::appSizeChanged, this, [this](int w, int h) {
+        Q_UNUSED(w);
+        if (m_mcpAppContainer && m_mcpAppVisible) {
+            m_mcpAppContainer->setMinimumHeight(qMax(120, h));
+            m_mcpAppContainer->adjustSize();
+        }
+    });
+
+    m_mcpAppRenderer->initializeAsync([](bool ok, const QString& err) {
+        if (!ok) qWarning() << "MCP App WebView2 init failed:" << err;
+    });
+}
+
+void AgentMainWindow::showMcpAppPanel(bool visible) {
+    if (!m_mcpAppContainer) return;
+    m_mcpAppVisible = visible;
+    m_mcpAppContainer->setVisible(visible);
+    if (visible && m_rightSplitter) {
+        const QList<int> sizes = m_rightSplitter->sizes();
+        if (sizes.size() == 2) {
+            const int total = sizes[0] + sizes[1];
+            m_rightSplitter->setSizes({total * 3 / 5, total * 2 / 5});  // 看板 60% / App 40%
+        }
+    }
+}
+
+void AgentMainWindow::handleMcpAppContent(const QString& html, const QString& toolName) {
+    if (!m_mcpAppRenderer || !m_mcpAppBridge) setupMcpAppRenderer();
+    if (!m_mcpAppRenderer) return;
+
+    // 从 namespaced 工具名（serverName_toolName）解析 serverName，attach 真实 client
+    const auto pair = m_host->toolRouter()->parseToolName(toolName);
+    const QString serverName = pair.first;
+    if (!serverName.isEmpty()) {
+        auto client = m_host->client(serverName);
+        if (client) m_mcpAppBridge->attach(m_mcpAppRenderer, client);
+    }
+
+    m_mcpAppRenderer->loadHtml(html, QUrl());
+    showMcpAppPanel(true);
+    appendLogHtml(QStringLiteral("<p style='color:#0a7d33;'><b>◇ MCP App 已渲染：</b>%1</p>")
+                      .arg(toolName.toHtmlEscaped()));
 }
 
 void AgentMainWindow::handleBrowseConfig() {
@@ -526,13 +641,16 @@ void AgentMainWindow::handleRunTask() {
             apiKey = qEnvironmentVariable("DEEPSEEK_API_KEY");
             if (apiKey.isEmpty()) {
                 apiKey = qEnvironmentVariable("OPENAI_API_KEY");
-                if (apiKey.isEmpty()) {
-                    QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("API 密钥不能为空，请在界面中输入！"));
-                    return;
-                }
             }
         }
-        m_llmBackend = std::make_shared<OpenAiLlmBackend>(apiUrl, apiKey, model, this);
+
+        if (apiKey.isEmpty()) {
+            // 未配置 API Key → 不阻塞，回退离线 Mock 演示（便于开箱即用体验）
+            qWarning().noquote() << "[AgentMainWindow] 未配置 API Key，本次回退离线 Mock 演示模式";
+            m_llmBackend = std::make_shared<MockLlmBackend>();
+        } else {
+            m_llmBackend = std::make_shared<OpenAiLlmBackend>(apiUrl, apiKey, model, this);
+        }
     } else {
         m_llmBackend = std::make_shared<MockLlmBackend>();
     }
@@ -540,6 +658,8 @@ void AgentMainWindow::handleRunTask() {
     
     // 监听 ReAct 循环信号并着色展示
     connect(m_session->executor(), &LlmAgentExecutor::stepProgress, this, &AgentMainWindow::handleStepProgress);
+    // 工具返回 MCP Apps UI → 内嵌渲染
+    connect(m_session->executor(), &LlmAgentExecutor::mcpAppContentAvailable, this, &AgentMainWindow::handleMcpAppContent);
     connect(m_session, &AgentSession::finished, this, &AgentMainWindow::handleSessionFinished);
 
     AgentRunOptions options;
