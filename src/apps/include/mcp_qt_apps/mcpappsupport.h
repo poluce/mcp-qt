@@ -10,7 +10,9 @@
 // 渲染层与协议层解耦：本类只处理"数据与消息"，不负责 HTML 渲染。
 // 渲染由 IMcpAppRenderer（可插拔）提供。
 
+#include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <QJsonObject>
 #include <QUrl>
 #include <functional>
@@ -99,6 +101,41 @@ public:
      */
     static bool parseAppMessage(const QJsonObject& message,
                                 QString* outMethod, qint64* outId, QJsonObject* outParams);
+
+    // ---- 沙箱安全构造（2026-01-26 规范 MUST 级）----
+
+    /**
+     * @brief 限制性默认 CSP（规范 Restrictive Default；ui.csp 省略时 MUST 使用）。
+     *        未声明的指令经 CSP default-src fallback 全部落到 'none'。
+     */
+    static QString buildDefaultCsp();
+
+    /**
+     * @brief 依据 _meta.ui 构造完整 CSP。
+     *        - 无 csp 子对象 → buildDefaultCsp()（规范 MUST 默认）
+     *        - 有 csp → 按 connectDomains/resourceDomains/frameDomains/baseUriDomains
+     *          扩展（规范 CSP Construction from Metadata）
+     * @param uiMeta 资源/工具声明的 _meta.ui 对象
+     */
+    static QString buildCsp(const QJsonObject& uiMeta);
+
+    /**
+     * @brief 依据 _meta.ui.permissions 构造内层 iframe 的 allow 属性（Permission Policy）。
+     *        camera/microphone/geolocation/clipboardWrite → camera/microphone/geolocation/clipboard-write。
+     * @param uiMeta 资源/工具声明的 _meta.ui 对象
+     */
+    static QString buildAllowAttribute(const QJsonObject& uiMeta);
+
+    // ---- 资源元数据辅助（MCP Apps 2026-01-26）----
+
+    /// 解析 _meta.ui.prefersBorder（App 是否偏好宿主显示沙箱边框）。缺省 true（安全默认：标识沙箱边界）。
+    static bool uiPrefersBorder(const QJsonObject& uiMeta);
+    /// 解析 _meta.ui.domain（App 专用源标识，格式由各 Host 定义）。未声明返回空。
+    static QString uiDomain(const QJsonObject& uiMeta);
+    /// 从 _meta.ui.csp 提取外部域名（connect/resource/frame/base 域），用于审计与用户警告。
+    static QStringList cspExternalDomains(const QJsonObject& uiMeta);
+    /// 计算 HTML 内容 SHA-256（十六进制小写），宿主可据此实现基于哈希的 allow/blocklist。
+    static QString hashHtml(const QByteArray& html);
 };
 
 } // namespace mcp_qt

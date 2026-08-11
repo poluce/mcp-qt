@@ -59,3 +59,27 @@ target_link_libraries(tests_qt_https_runtime PRIVATE
     Qt6::Core
     Qt6::Network
 )
+
+# MCP Apps A4 端到端测试（独立目标：需 node 起 mock 服务器，避免干扰主测试）
+add_executable(tests_qt_apps_e2e EXCLUDE_FROM_ALL
+    e2e_main.cpp
+    test_qt_mcp_apps_e2e.cpp
+    common.cpp
+)
+
+target_include_directories(tests_qt_apps_e2e PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/transport/include
+    ${CMAKE_SOURCE_DIR}/src/transport/src
+    ${CMAKE_SOURCE_DIR}/src/client/include
+    ${CMAKE_SOURCE_DIR}/src/apps/include
+)
+
+target_link_libraries(tests_qt_apps_e2e PRIVATE
+    mcp_qt_transport
+    mcp_qt_client
+    mcp_qt_apps
+    Qt6::Core
+    Qt6::Network
+)

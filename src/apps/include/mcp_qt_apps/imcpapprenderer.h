@@ -56,6 +56,13 @@ public:
      */
     virtual void setPermissionPolicy(const std::vector<QString>& allowedTools,
                                      const std::vector<QString>& allowedCapabilities) = 0;
+
+    /**
+     * @brief 设置当前 App 资源的 UI 元数据（_meta.ui：csp / permissions / domain 等）。
+     *        渲染器据此构造沙箱 CSP 与内层 iframe 的 allow 属性。应在 loadHtml 前调用。
+     * @param uiMeta 资源/工具声明的 _meta.ui 对象（空对象 = 无声明，使用限制性默认 CSP）
+     */
+    virtual void setUiMeta(const QJsonObject& uiMeta) = 0;
 };
 
 } // namespace mcp_qt

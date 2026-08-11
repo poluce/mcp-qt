@@ -56,6 +56,21 @@ void McpAppBridge::setProtocolVersion(const QString& version) {
     m_protocolVersion = version;
 }
 
+// ========== hostContext 配置 ==========
+void McpAppBridge::setTheme(const QString& theme) { m_theme = theme; }
+void McpAppBridge::setLocale(const QString& locale) { m_locale = locale; }
+void McpAppBridge::setTimeZone(const QString& timeZone) { m_timeZone = timeZone; }
+void McpAppBridge::setContainerDimensions(const QJsonObject& dims) { m_containerDimensions = dims; }
+void McpAppBridge::setSafeAreaInsets(const QJsonObject& insets) { m_safeAreaInsets = insets; }
+void McpAppBridge::setDeviceCapabilities(const QJsonObject& caps) { m_deviceCapabilities = caps; }
+void McpAppBridge::setStyles(const QJsonObject& styles) { m_styles = styles; }
+void McpAppBridge::setDisplayModes(const QStringList& modes) {
+    m_availableDisplayModes = modes;
+    if (!modes.contains(m_displayMode)) {
+        m_displayMode = modes.isEmpty() ? QStringLiteral("inline") : modes.first();
+    }
+}
+
 void McpAppBridge::setPermissionPolicy(const std::vector<QString>& allowedTools,
                                        const std::vector<QString>& allowedCapabilities) {
     m_allowedTools = allowedTools;
@@ -77,6 +92,19 @@ void McpAppBridge::setRequestDisplayModeHandler(std::function<void(const QJsonOb
 
 // ========== 消息分发 ==========
 void McpAppBridge::handleMessage(const QJsonObject& message) {
+    // 响应消息（无 method，含 id + result/error）：路由到挂起的请求（如 teardown 等待响应）
+    if (!message.contains(QStringLiteral("method")) && message.contains(QStringLiteral("id"))) {
+        const qint64 rid = message.value(QStringLiteral("id")).toVariant().toLongLong();
+        auto it = m_pendingTeardown.find(rid);
+        if (it != m_pendingTeardown.end()) {
+            auto cb = it->second;
+            m_pendingTeardown.erase(it);
+            if (cb) cb(true, message.value(QStringLiteral("result")).toObject(),
+                       message.value(QStringLiteral("error")).toObject());
+        }
+        return;
+    }
+
     QString method;
     qint64 id = 0;
     QJsonObject params;
@@ -104,11 +132,19 @@ void McpAppBridge::handleMessage(const QJsonObject& message) {
         handleUpdateModelContext(params, id);
     } else if (method == QStringLiteral("ui/request-display-mode")) {
         handleRequestDisplayMode(params, id);
+    } else if (method == QStringLiteral("ui/notifications/initialized")) {
+        m_initialized = true;
+        qDebug() << "[McpAppBridge] View initialized; host may now send notifications";
+    } else if (method == QStringLiteral("ui/notifications/size-changed")) {
+        const int w = params.value(QStringLiteral("width")).toInt(0);
+        const int h = params.value(QStringLiteral("height")).toInt(0);
+        qDebug() << "[McpAppBridge] size-changed:" << w << "x" << h;
+        emit appSizeChanged(w, h);
     } else if (method.startsWith(QStringLiteral("ui/notifications/"))) {
-        // View 通知：记录或忽略（initialized / size-changed 等）
+        // 其它 View 通知：记录或忽略
         qDebug() << "[McpAppBridge] notification ignored:" << method;
     } else if (method == QStringLiteral("notifications/message")) {
-        qDebug() << "[McpAppBridge] app log:" << params;
+        emit appLogMessage(params);
     } else {
         qWarning() << "[McpAppBridge] unknown method:" << method;
         sendError(id, -32601, QStringLiteral("Method not found: ") + method);
@@ -117,7 +153,26 @@ void McpAppBridge::handleMessage(const QJsonObject& message) {
 
 // ========== ui/initialize 握手 ==========
 void McpAppBridge::handleInitialize(const QJsonObject& params, qint64 id) {
-    // params.appCapabilities：App 声明的能力（tools / sendOpenLink / availableDisplayModes 等）
+    // 解析 App 声明的能力（appCapabilities.availableDisplayModes），用于 displayMode 协商约束
+    m_appDisplayModes.clear();
+    const QJsonValue dm = params.value(QStringLiteral("appCapabilities")).toObject()
+                              .value(QStringLiteral("availableDisplayModes"));
+    if (dm.isArray()) {
+        for (const auto& v : dm.toArray()) m_appDisplayModes << v.toString();
+    }
+
+    QJsonObject hostContext;
+    hostContext[QStringLiteral("displayMode")] = m_displayMode;
+    hostContext[QStringLiteral("availableDisplayModes")] = QJsonArray::fromStringList(m_availableDisplayModes);
+    hostContext[QStringLiteral("theme")] = m_theme;
+    hostContext[QStringLiteral("platform")] = QStringLiteral("desktop");
+    if (!m_locale.isEmpty()) hostContext[QStringLiteral("locale")] = m_locale;
+    if (!m_timeZone.isEmpty()) hostContext[QStringLiteral("timeZone")] = m_timeZone;
+    if (!m_containerDimensions.isEmpty()) hostContext[QStringLiteral("containerDimensions")] = m_containerDimensions;
+    if (!m_safeAreaInsets.isEmpty()) hostContext[QStringLiteral("safeAreaInsets")] = m_safeAreaInsets;
+    if (!m_deviceCapabilities.isEmpty()) hostContext[QStringLiteral("deviceCapabilities")] = m_deviceCapabilities;
+    if (!m_styles.isEmpty()) hostContext[QStringLiteral("styles")] = m_styles;
+
     const QJsonObject result{
         {QStringLiteral("protocolVersion"), m_protocolVersion},
         {QStringLiteral("hostCapabilities"), QJsonObject{
@@ -130,11 +185,7 @@ void McpAppBridge::handleInitialize(const QJsonObject& params, qint64 id) {
             {QStringLiteral("name"), m_hostName},
             {QStringLiteral("version"), m_hostVersion}
         }},
-        {QStringLiteral("hostContext"), QJsonObject{
-            {QStringLiteral("displayMode"), QStringLiteral("inline")},
-            {QStringLiteral("availableDisplayModes"), QJsonArray{QStringLiteral("inline")}},
-            {QStringLiteral("platform"), QStringLiteral("desktop")}
-        }}
+        {QStringLiteral("hostContext"), hostContext}
     };
     sendResponse(id, result);
 }
@@ -280,13 +331,22 @@ void McpAppBridge::handleRequestDisplayMode(const QJsonObject& params, qint64 id
         });
         return;
     }
-    // 默认只支持 inline
-    sendResponse(id, QJsonObject{{QStringLiteral("mode"), QStringLiteral("inline")}});
+    // 默认协商：目标模式必须同时被 App 声明（appCapabilities）与宿主支持，否则返回当前实际模式
+    const QString requested = params.value(QStringLiteral("mode")).toString();
+    const bool appOk = m_appDisplayModes.isEmpty() || m_appDisplayModes.contains(requested);
+    const bool hostOk = m_availableDisplayModes.contains(requested);
+    if (!requested.isEmpty() && appOk && hostOk) {
+        m_displayMode = requested;
+        emit displayModeChanged(requested);
+        sendResponse(id, QJsonObject{{QStringLiteral("mode"), requested}});
+    } else {
+        sendResponse(id, QJsonObject{{QStringLiteral("mode"), m_displayMode}});
+    }
 }
 
 // ========== Host → View 通知 ==========
 void McpAppBridge::sendToolInput(const QJsonObject& arguments) {
-    if (!m_running || !m_renderer) return;
+    if (!m_running || !m_initialized || !m_renderer) return;
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-input")},
@@ -295,7 +355,7 @@ void McpAppBridge::sendToolInput(const QJsonObject& arguments) {
 }
 
 void McpAppBridge::sendToolInputPartial(const QJsonObject& arguments) {
-    if (!m_running || !m_renderer) return;
+    if (!m_running || !m_initialized || !m_renderer) return;
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-input-partial")},
@@ -304,7 +364,7 @@ void McpAppBridge::sendToolInputPartial(const QJsonObject& arguments) {
 }
 
 void McpAppBridge::sendToolResult(const QJsonObject& callToolResult) {
-    if (!m_running || !m_renderer) return;
+    if (!m_running || !m_initialized || !m_renderer) return;
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-result")},
@@ -313,7 +373,7 @@ void McpAppBridge::sendToolResult(const QJsonObject& callToolResult) {
 }
 
 void McpAppBridge::sendToolCancelled(const QString& reason) {
-    if (!m_running || !m_renderer) return;
+    if (!m_running || !m_initialized || !m_renderer) return;
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-cancelled")},
@@ -322,7 +382,7 @@ void McpAppBridge::sendToolCancelled(const QString& reason) {
 }
 
 void McpAppBridge::sendHostContextChanged(const QJsonObject& partialContext) {
-    if (!m_running || !m_renderer) return;
+    if (!m_running || !m_initialized || !m_renderer) return;
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/host-context-changed")},
@@ -330,17 +390,34 @@ void McpAppBridge::sendHostContextChanged(const QJsonObject& partialContext) {
     });
 }
 
-void McpAppBridge::teardownResource(const QString& reason) {
-    if (!m_running || !m_renderer) return;
+void McpAppBridge::teardownResource(const QString& reason,
+                                    std::function<void(bool, const QJsonObject&, const QJsonObject&)> done) {
+    if (!m_running || !m_initialized || !m_renderer) {
+        if (done) done(false, QJsonObject{}, QJsonObject{{QStringLiteral("message"), QStringLiteral("not running")}});
+        return;
+    }
+    const qint64 rid = m_nextRequestId++;
+    if (done) m_pendingTeardown[rid] = std::move(done);
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), rid},
         {QStringLiteral("method"), QStringLiteral("ui/resource-teardown")},
         {QStringLiteral("params"), QJsonObject{{QStringLiteral("reason"), reason}}}
+    });
+    // 超时兜底：2s 未收到 App 响应视为可安全销毁
+    QTimer::singleShot(2000, this, [this, rid]() {
+        auto it = m_pendingTeardown.find(rid);
+        if (it != m_pendingTeardown.end()) {
+            auto cb = it->second;
+            m_pendingTeardown.erase(it);
+            if (cb) cb(false, QJsonObject{},
+                       QJsonObject{{QStringLiteral("message"), QStringLiteral("teardown timeout")}});
+        }
     });
 }
 
 void McpAppBridge::sendToolListChanged() {
-    if (!m_running || !m_renderer) return;
+    if (!m_running || !m_initialized || !m_renderer) return;
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-list-changed")},

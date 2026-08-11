@@ -15,6 +15,9 @@
 #include "IMcpAppRenderer.h"
 #include <QJsonObject>
 #include <QPointer>
+#include <QSet>
+#include <QStringList>
+#include <QTimer>
 #include <QUrl>
 #include <QWidget>
 #include <functional>
@@ -43,6 +46,20 @@ public:
     explicit McpAppWebView2Renderer(QWidget* parent = nullptr);
     ~McpAppWebView2Renderer() override;
 
+signals:
+    /// 沙箱 CSP 已构造并注入（安全审计日志，规范 Host SHOULD 记录）。
+    void cspAudited(const QString& csp);
+    /// 检测到 App 声明访问外部域（_meta.ui.csp 的 connect/resource/frame/base 域），宿主应警示用户。
+    void externalDomainsDetected(const QStringList& domains);
+    /// 沙箱页面加载超时（15s 内未完成导航，基本资源防护）。
+    void loadTimeout();
+    /// HTML 被安全策略拦截（内容白名单不匹配 / 外部域警告被拒绝），未渲染。
+    void htmlBlockedByPolicy();
+    /// WebView2 子进程总内存超限（totalMb > maxMb，资源限制）。
+    void resourceLimitExceeded(int totalMb, int maxMb);
+
+public:
+
     // IMcpAppRenderer
     QWidget* hostWidget() override { return this; }
     void loadHtml(const QString& html, const QUrl& baseUrl) override;
@@ -50,6 +67,7 @@ public:
     void setAppMessageHandler(std::function<void(const QJsonObject&)> handler) override;
     void setPermissionPolicy(const std::vector<QString>& allowedTools,
                              const std::vector<QString>& allowedCapabilities) override;
+    void setUiMeta(const QJsonObject& uiMeta) override;
 
     /**
      * @brief 异步初始化 WebView2（首次调用自动创建环境/控制器）。
@@ -62,15 +80,25 @@ public:
      */
     bool isReady() const { return m_ready; }
 
+    // ---- 安全策略（资源限制 / 内容白名单 / 外部域警告）----
+    /// 设置 WebView2 子进程总内存上限（MB）。0=禁用。超限发射 resourceLimitExceeded。
+    void setMaxMemoryMb(int mb);
+    /// 设置 HTML 内容 SHA-256 白名单；非空白名单时仅允许白名单内的 HTML 渲染（哈希 allowlist）。
+    void setAllowedHtmlHashes(const QSet<QString>& hashes);
+    /// 启用外部域访问确认对话框（默认关闭，仅发 externalDomainsDetected 信号）。
+    void setExternalDomainWarningEnabled(bool on);
+
 protected:
     void showEvent(QShowEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private:
     void ensureInitialized();
-    void injectBridgeScript();
+    void loadSandboxShell();
+    void sendSandboxResourceReady();
     void handleWebMessage(const QString& json);
     void postToJs(const QString& jsonString);
+    void checkMemoryUsage();
 
     // WebView2 COM 状态
     void* m_environment{nullptr};     // ICoreWebView2Environment*
@@ -78,14 +106,20 @@ private:
     void* m_webview{nullptr};         // ICoreWebView2*
     bool m_ready{false};
     bool m_initStarted{false};
+    bool m_navCompleted{false};       // 最近一次沙箱导航是否完成（看门狗用）
     QString m_pendingHtml;
     QUrl m_pendingBaseUrl;
+    QJsonObject m_uiMeta;             // 最近一次 setUiMeta（_meta.ui：csp/permissions）
 
     std::function<void(const QJsonObject&)> m_messageHandler;
     std::function<void(bool, const QString&)> m_onReady;
 
-    QString m_bridgeScript;
-    QJsonObject m_pendingQueue; // 待初始化的消息队列（简化：初始化前消息丢弃）
+    // 安全策略状态
+    QSet<QString> m_allowedHtmlHashes;   // HTML SHA-256 白名单（空 = 不过滤）
+    bool m_extDomainWarning{false};      // 外部域访问是否弹确认框
+    bool m_extDomainApproved{true};      // 外部域是否已获用户确认
+    int m_maxMemoryMb{0};                // WebView2 子进程内存上限（MB），0=禁用
+    QTimer* m_memTimer{nullptr};         // 内存监控定时器
 };
 
 } // namespace mcp_qt

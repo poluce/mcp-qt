@@ -17,7 +17,10 @@
 #include "mcp_qt_apps/IMcpAppRenderer.h"
 #include <QJsonObject>
 #include <QObject>
+#include <QStringList>
+#include <QTimer>
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -37,6 +40,15 @@ public:
     explicit McpAppBridge(QObject* parent = nullptr);
     ~McpAppBridge() override;
 
+signals:
+    /// App 通过 ui/notifications/size-changed 报告内容尺寸（弹性尺寸模式，规范 View SHOULD）。
+    void appSizeChanged(int width, int height);
+    /// App 通过 notifications/message 记录日志（params 为通知参数）。
+    void appLogMessage(const QJsonObject& params);
+    /// 显示模式切换已生效（App 请求 ui/request-display-mode 且协商通过）。
+    void displayModeChanged(const QString& mode);
+
+public:
     // ---- 装配 ----
     /// 绑定渲染器与 MCP 服务器客户端（必须设置后才可 start）。
     void attach(IMcpAppRenderer* renderer, std::shared_ptr<McpQtClient> client);
@@ -53,6 +65,24 @@ public:
     void setHostInfo(const QString& name, const QString& version);
     /// 设置 AppBridge 协议版本（默认 "2026-01-26"，MCP Apps stable 版本）。
     void setProtocolVersion(const QString& version);
+
+    // ---- hostContext 配置（ui/initialize 返回给 App 的宿主上下文）----
+    /// 设置主题（"light"/"dark"，默认 "light"）。主题变量建议用 light-dark()。
+    void setTheme(const QString& theme);
+    /// 设置宿主区域（BCP-47，如 "zh-CN"）。
+    void setLocale(const QString& locale);
+    /// 设置宿主时区（IANA，如 "Asia/Shanghai"）。
+    void setTimeZone(const QString& timeZone);
+    /// 设置容器尺寸约束（{ width|maxWidth, height|maxHeight }，fixed/flexible）。
+    void setContainerDimensions(const QJsonObject& dims);
+    /// 设置安全区域（{ top, right, bottom, left }）。
+    void setSafeAreaInsets(const QJsonObject& insets);
+    /// 设置设备能力（如 { colorScheme, screenSize }）。
+    void setDeviceCapabilities(const QJsonObject& caps);
+    /// 设置宿主样式变量（variables/css）。
+    void setStyles(const QJsonObject& styles);
+    /// 设置宿主支持的显示模式（默认仅 {"inline"}）。App 只能请求本集合内的模式。
+    void setDisplayModes(const QStringList& modes);
 
     // ---- A2 权限策略 ----
     /**
@@ -85,8 +115,10 @@ public:
     void sendToolCancelled(const QString& reason);
     /// ui/notifications/host-context-changed：通知宿主上下文变化。
     void sendHostContextChanged(const QJsonObject& partialContext);
-    /// ui/resource-teardown：销毁资源前通知（并等待响应）。
-    void teardownResource(const QString& reason = QString());
+    /// ui/resource-teardown：销毁资源前请求 View 确认（规范 SHOULD 等待响应）。
+    /// done 回调 (ok, result, error)：成功 / 失败 / 超时(2s) 后调用。
+    void teardownResource(const QString& reason = QString(),
+                          std::function<void(bool ok, const QJsonObject& result, const QJsonObject& error)> done = nullptr);
 
     /// 触发 tools/list_changed 通知（服务器工具列表变化时）。
     void sendToolListChanged();
@@ -116,10 +148,27 @@ private:
     IMcpAppRenderer* m_renderer{nullptr};
     std::shared_ptr<McpQtClient> m_client;
     bool m_running{false};
+    bool m_initialized{false};  // 已收到 ui/notifications/initialized（规范：此前 MUST NOT 发消息）
 
     QString m_hostName{QStringLiteral("mcp-qt-client")};
     QString m_hostVersion{QStringLiteral("1.0.0")};
     QString m_protocolVersion{QStringLiteral("2026-01-26")};
+
+    // hostContext 字段（ui/initialize 返回）
+    QString m_theme{QStringLiteral("light")};
+    QString m_locale;
+    QString m_timeZone;
+    QJsonObject m_containerDimensions;
+    QJsonObject m_safeAreaInsets;
+    QJsonObject m_deviceCapabilities;
+    QJsonObject m_styles;
+    QString m_displayMode{QStringLiteral("inline")};
+    QStringList m_availableDisplayModes{QStringLiteral("inline")};
+    QStringList m_appDisplayModes;  // App 在 ui/initialize 声明的可用显示模式
+
+    // teardown 等待响应
+    qint64 m_nextRequestId{1};
+    std::map<qint64, std::function<void(bool, const QJsonObject&, const QJsonObject&)>> m_pendingTeardown;
 
     std::vector<QString> m_allowedTools;
     std::vector<QString> m_allowedCapabilities;

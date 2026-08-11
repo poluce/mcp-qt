@@ -92,6 +92,9 @@ src/
    - MinGW 不能链接 MSVC 的 `WebView2LoaderStatic.lib`（CRT 符号不匹配）→ **必须动态加载** `WebView2Loader.dll`（`LoadLibrary + GetProcAddress`）。
    - COM 回调接口在 MinGW 下手写 vtable，**引用计数必须正确**：raw 指针赋值后要显式 `AddRef()`，否则 WebView2 回调返回后对象被释放 → 后续操作静默失败（这是此前"环境问题"误判的根因）。
    - `CreateCoreWebView2EnvironmentWithOptions` 的 `userDataFolder` 建议用绝对路径。
+   - **QWidget 渲染器不要用 `std::shared_ptr` 持有**：一旦 `layout->addWidget(renderer)` reparent 到 Qt，Qt 父对象与 shared_ptr 形成双所有权，程序退出时二次 `delete` 崩溃（`0xC0000409`）。裸指针 + Qt 父子管理即可。
+   - **并发/多次实例必须指定独立 `userDataFolder`**：共享默认目录会锁冲突，`CreateCoreWebView2Controller` 报 `0x800700AA ERROR_NO_SYSTEM_RESOURCES`。崩溃残留的孤儿 `msedgewebview2` 进程也会累积占资源，需清理。
+   - **Chromium 解析陷阱**：`<script>` 块内出现字面量 `<script`/`</script`（即使在 JS 字符串里）会进入 double-escaped 解析状态使整个脚本失效。JS 里表示 `<` 要用 `\x3C` 转义；也不要裸写 `'</script>'` 字符串。
 
 ## 4. 已完成能力（2026-07-28）
 
@@ -130,11 +133,11 @@ src/
 | A1 | **AppBridge 工具调用代理** | ✅ 已实现：`McpAppBridge`（tools/call、tools/list、resources/read 代理 + 响应回传） | — |
 | A2 | **权限策略细化** | ✅ 已实现：`McpAppBridge::setPermissionPolicy`（allowedTools/allowedCapabilities 校验 + `_meta.ui.visibility` 可见性过滤） | — |
 | A3 | **更多 ui/ 方言方法** | ✅ 已实现：ui/open-link、ui/message、ui/update-model-context、ui/request-display-mode（可自定义 handler） | — |
-| A4 | **ui:// 真实服务器端到端** | ⚠️ 待验证 | 找一个支持 MCP Apps 的服务器验证 |
-| A5 | **QCefView 后端** | ⚠️ IMcpAppRenderer 抽象已预留 | 跨平台需要时加（需 MSVC + Qt MSVC 包） |
-| A6 | **跨平台渲染** | ⚠️ WebView2 仅 Windows | macOS（WKWebView）/Linux（WebKitGTK）后端 |
+| A4 | **ui:// 真实服务器端到端** | ✅ 已验证（2026-08-11）：官方 `@modelcontextprotocol/server-threejs` 联调通过（`tests_qt_apps_e2e` 设 `MCP_APPS_E2E_URL` 连外部服务器，ui:// 资源走 `resources/read`） | — |
+| A5 | **QCefView 后端** | ⛔ 暂不实现（2026-08-11 用户决定，不纳入范围） | `IMcpAppRenderer` 抽象已预留 |
+| A6 | **跨平台渲染** | ⛔ 暂不实现（2026-08-11 用户决定，不纳入范围） | WebView2 仅 Windows；其它平台需对应后端 |
 | A7 | **自动化测试** | ✅ 已补充：`test_qt_mcp_app_bridge.cpp`（7 用例，mock renderer/transport，无需 WebView2） | — |
-| A8 | **沙箱/CSP 细化** | ⚠️ WebView2 默认隔离，CSP/permissions 细化待做 | 参考 MCP Apps 安全模型 |
+| A8 | **沙箱/CSP 细化** | ✅ 已实现（2026-08-11）：双 iframe 沙箱代理 + CSP + permissions→allow + initialized 门禁 + size-changed + WebView2 权限授予 + hostContext + displayMode 协商 + appLogMessage + teardown 等待 + CSP 审计 + 沙箱边界 + 外部域检测 + prefersBorder/domain + hashHtml + 加载看门狗 + **资源限制（内存监控）+ 哈希 allowlist + 未声明域警告 UI**，单测 + `mcp_app_demo` 端到端 + **A4 端到端（`tests_qt_apps_e2e`，官方 `server-threejs` 联调通过）** 验证通过 | 剩余：A5/A6 跨平台渲染（受平台限制） |
 
 ### 5.3 已知环境性/历史限制（非本分支回归）
 

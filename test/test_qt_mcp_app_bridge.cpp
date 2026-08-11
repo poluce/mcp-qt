@@ -24,6 +24,7 @@ public:
     void sendMessageToApp(const QJsonObject& m) override { sentMessages.append(m); }
     void setAppMessageHandler(std::function<void(const QJsonObject&)> h) override { handler = std::move(h); }
     void setPermissionPolicy(const std::vector<QString>&, const std::vector<QString>&) override {}
+    void setUiMeta(const QJsonObject&) override {}
 };
 
 // 捕获出站消息的 mock MCP transport
@@ -334,4 +335,292 @@ void test_qt_mcp_app_bridge_tools_call_visibility_denied() {
     if (renderer.sentMessages.isEmpty()) return;
     const QJsonObject err = renderer.sentMessages.first().value(QStringLiteral("error")).toObject();
     TM_ASSERT_TRUE(!err.isEmpty(), "model-only tool should be denied for app");
+}
+
+// ui 元数据辅助：prefersBorder / domain / 外部域收集（去重）/ HTML 哈希
+void test_mcp_app_support_ui_meta_helpers() {
+    // uiPrefersBorder：缺省 true（安全默认）
+    TM_ASSERT_TRUE(mcp_qt::McpAppSupport::uiPrefersBorder(QJsonObject{}), "prefersBorder default should be true");
+    TM_ASSERT_FALSE(mcp_qt::McpAppSupport::uiPrefersBorder(QJsonObject{{QStringLiteral("prefersBorder"), false}}), "prefersBorder=false should be honored");
+
+    // uiDomain
+    TM_ASSERT_TRUE(mcp_qt::McpAppSupport::uiDomain(QJsonObject{{QStringLiteral("domain"), QStringLiteral("https://x.example")}}) == QStringLiteral("https://x.example"), "domain should be parsed");
+    TM_ASSERT_TRUE(mcp_qt::McpAppSupport::uiDomain(QJsonObject{}).isEmpty(), "no domain -> empty");
+
+    // cspExternalDomains：跨指令收集 + 去重
+    const QStringList ext = mcp_qt::McpAppSupport::cspExternalDomains(QJsonObject{
+        {QStringLiteral("csp"), QJsonObject{
+            {QStringLiteral("connectDomains"), QJsonArray{QStringLiteral("https://api.example.com")}},
+            {QStringLiteral("resourceDomains"), QJsonArray{QStringLiteral("https://cdn.example.com"), QStringLiteral("https://api.example.com")}},
+            {QStringLiteral("frameDomains"), QJsonArray{}},
+            {QStringLiteral("baseUriDomains"), QJsonArray{QStringLiteral("https://base.example.com")}}
+        }}
+    });
+    TM_ASSERT_TRUE(ext.contains(QStringLiteral("https://api.example.com")), "connect domain should be collected");
+    TM_ASSERT_TRUE(ext.contains(QStringLiteral("https://cdn.example.com")), "resource domain should be collected");
+    TM_ASSERT_TRUE(ext.contains(QStringLiteral("https://base.example.com")), "base domain should be collected");
+    TM_ASSERT_EQ(ext.size(), 3, "domains should be deduplicated");
+
+    // hashHtml：SHA-256 确定性
+    const QString h1 = mcp_qt::McpAppSupport::hashHtml("<html>hi</html>");
+    const QString h2 = mcp_qt::McpAppSupport::hashHtml("<html>hi</html>");
+    const QString h3 = mcp_qt::McpAppSupport::hashHtml("<html>bye</html>");
+    TM_ASSERT_EQ(h1.size(), 64, "sha256 hex should be 64 chars");
+    TM_ASSERT_TRUE(h1 == h2, "same content -> same hash");
+    TM_ASSERT_TRUE(h1 != h3, "different content -> different hash");
+}
+
+// ========== MUST 级合规：沙箱安全构造 + initialized 门禁 + size-changed ==========
+
+// 默认 CSP（无 ui.csp）→ 限制性默认；有 csp → 按域扩展 + 未声明域最严格
+void test_mcp_app_support_csp_construction() {
+    // 无 csp → 规范 Restrictive Default
+    const QString def = mcp_qt::McpAppSupport::buildCsp(QJsonObject{});
+    TM_ASSERT_TRUE(def.contains(QStringLiteral("default-src 'none'")), "default CSP must set default-src 'none'");
+    TM_ASSERT_TRUE(def.contains(QStringLiteral("script-src 'self' 'unsafe-inline'")), "default CSP must allow inline script (app needs it)");
+    TM_ASSERT_TRUE(def.contains(QStringLiteral("style-src 'self' 'unsafe-inline'")), "default CSP must allow inline style");
+    TM_ASSERT_TRUE(def.contains(QStringLiteral("img-src 'self' data:")), "default CSP must allow self+data images");
+    TM_ASSERT_TRUE(def.contains(QStringLiteral("connect-src 'none'")), "default CSP must block network connections");
+
+    // 有 csp → 按 connectDomains/resourceDomains 扩展；frame/base 未声明则最严格
+    const QJsonObject uiMeta{
+        {QStringLiteral("csp"), QJsonObject{
+            {QStringLiteral("connectDomains"), QJsonArray{QStringLiteral("https://api.example.com")}},
+            {QStringLiteral("resourceDomains"), QJsonArray{QStringLiteral("https://cdn.example.com")}},
+            {QStringLiteral("frameDomains"), QJsonArray{}},
+            {QStringLiteral("baseUriDomains"), QJsonArray{}}
+        }}
+    };
+    const QString csp = mcp_qt::McpAppSupport::buildCsp(uiMeta);
+    TM_ASSERT_TRUE(csp.contains(QStringLiteral("connect-src 'self' https://api.example.com")), "connectDomains should extend connect-src");
+    TM_ASSERT_TRUE(csp.contains(QStringLiteral("img-src 'self' data: https://cdn.example.com")), "resourceDomains should extend img-src");
+    TM_ASSERT_TRUE(csp.contains(QStringLiteral("frame-src 'none'")), "empty frameDomains must fall back to 'none'");
+    TM_ASSERT_TRUE(csp.contains(QStringLiteral("base-uri 'self'")), "empty baseUriDomains must fall back to 'self'");
+    TM_ASSERT_TRUE(csp.contains(QStringLiteral("object-src 'none'")), "object-src must always be 'none'");
+}
+
+// permissions → iframe allow 属性（Permission Policy）
+void test_mcp_app_support_allow_attribute() {
+    const QString allow = mcp_qt::McpAppSupport::buildAllowAttribute(QJsonObject{
+        {QStringLiteral("permissions"), QJsonObject{
+            {QStringLiteral("camera"), QJsonObject{}},
+            {QStringLiteral("microphone"), QJsonObject{}},
+            {QStringLiteral("clipboardWrite"), QJsonObject{}}
+        }}
+    });
+    TM_ASSERT_TRUE(allow.contains(QStringLiteral("camera")), "camera permission → allow camera");
+    TM_ASSERT_TRUE(allow.contains(QStringLiteral("microphone")), "microphone permission → allow microphone");
+    TM_ASSERT_TRUE(allow.contains(QStringLiteral("clipboard-write")), "clipboardWrite → allow clipboard-write");
+    TM_ASSERT_TRUE(!allow.contains(QStringLiteral("geolocation")), "geolocation not requested");
+
+    // 无 permissions → 空
+    const QString none = mcp_qt::McpAppSupport::buildAllowAttribute(QJsonObject{});
+    TM_ASSERT_TRUE(none.isEmpty(), "no permissions → empty allow attribute");
+}
+
+// initialized 门禁：收到 ui/notifications/initialized 前 Host MUST NOT 发消息
+void test_qt_mcp_app_bridge_initialized_gate() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.start();
+
+    // 未初始化 → 主动通知被丢弃
+    bridge.sendToolInput(QJsonObject{{QStringLiteral("a"), 1}});
+    bridge.sendToolResult(QJsonObject{{QStringLiteral("content"), QJsonArray{}}});
+    bridge.teardownResource(QString());
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 0, "no host messages before ui/notifications/initialized");
+
+    // 收到 initialized → 可发送
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("ui/notifications/initialized")},
+        {QStringLiteral("params"), QJsonObject{}}
+    });
+    bridge.sendToolInput(QJsonObject{{QStringLiteral("a"), 1}});
+    bridge.sendToolResult(QJsonObject{{QStringLiteral("content"), QJsonArray{}}});
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 2, "host may send after initialized");
+    if (renderer.sentMessages.size() < 2) return;
+    TM_ASSERT_TRUE(renderer.sentMessages.at(0).value(QStringLiteral("method")).toString() == QStringLiteral("ui/notifications/tool-input"), "first should be tool-input");
+    TM_ASSERT_TRUE(renderer.sentMessages.at(1).value(QStringLiteral("method")).toString() == QStringLiteral("ui/notifications/tool-result"), "second should be tool-result");
+}
+
+// size-changed → appSizeChanged 信号
+void test_qt_mcp_app_bridge_size_changed() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.start();
+
+    int gotW = -1, gotH = -1;
+    QObject::connect(&bridge, &mcp_qt::McpAppBridge::appSizeChanged,
+                     [&](int w, int h) { gotW = w; gotH = h; });
+
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("ui/notifications/size-changed")},
+        {QStringLiteral("params"), QJsonObject{{QStringLiteral("width"), 320},
+                                               {QStringLiteral("height"), 480}}}
+    });
+    TM_ASSERT_EQ(gotW, 320, "size-changed width should propagate via signal");
+    TM_ASSERT_EQ(gotH, 480, "size-changed height should propagate via signal");
+}
+
+// ========== 缺失项补齐：hostContext / displayMode 协商 / message 信号 / teardown 等待 ==========
+
+// ui/initialize 返回完整 hostContext（theme/locale/timeZone/containerDimensions/availableDisplayModes）
+void test_qt_mcp_app_bridge_host_context_full() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.setTheme(QStringLiteral("dark"));
+    bridge.setLocale(QStringLiteral("zh-CN"));
+    bridge.setTimeZone(QStringLiteral("Asia/Shanghai"));
+    bridge.setContainerDimensions(QJsonObject{{QStringLiteral("width"), 400}});
+    bridge.setSafeAreaInsets(QJsonObject{{QStringLiteral("bottom"), 24}});
+    bridge.setDisplayModes({QStringLiteral("inline"), QStringLiteral("fullscreen")});
+    bridge.start();
+
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), 1},
+        {QStringLiteral("method"), QStringLiteral("ui/initialize")},
+        {QStringLiteral("params"), QJsonObject{{QStringLiteral("appCapabilities"), QJsonObject{
+            {QStringLiteral("availableDisplayModes"), QJsonArray{QStringLiteral("inline"), QStringLiteral("fullscreen")}}}
+        }}}
+    });
+
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 1, "should respond to ui/initialize");
+    if (renderer.sentMessages.isEmpty()) return;
+    const QJsonObject hc = renderer.sentMessages.first().value(QStringLiteral("result")).toObject()
+                               .value(QStringLiteral("hostContext")).toObject();
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("theme")).toString() == QStringLiteral("dark"), "theme should be dark");
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("locale")).toString() == QStringLiteral("zh-CN"), "locale should be zh-CN");
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("timeZone")).toString() == QStringLiteral("Asia/Shanghai"), "timeZone should be set");
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("containerDimensions")).toObject().value(QStringLiteral("width")).toInt() == 400, "containerDimensions should be set");
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("safeAreaInsets")).toObject().value(QStringLiteral("bottom")).toInt() == 24, "safeAreaInsets should be set");
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("availableDisplayModes")).toArray().contains(QStringLiteral("fullscreen")), "availableDisplayModes should include fullscreen");
+    TM_ASSERT_TRUE(hc.value(QStringLiteral("displayMode")).toString() == QStringLiteral("inline"), "current displayMode should be inline");
+}
+
+// displayMode 协商：目标模式需同时被 App 声明 与 宿主支持，否则返回当前模式
+void test_qt_mcp_app_bridge_display_mode_negotiation() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.setDisplayModes({QStringLiteral("inline"), QStringLiteral("fullscreen"), QStringLiteral("pip")});
+    bridge.start();
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), 1},
+        {QStringLiteral("method"), QStringLiteral("ui/initialize")},
+        {QStringLiteral("params"), QJsonObject{{QStringLiteral("appCapabilities"), QJsonObject{
+            {QStringLiteral("availableDisplayModes"), QJsonArray{QStringLiteral("fullscreen"), QStringLiteral("pip")}}}
+        }}}
+    });
+    renderer.sentMessages.clear();
+
+    // 请求合法模式（App 与 Host 都支持）
+    bool modeChanged = false;
+    QString changedMode;
+    QObject::connect(&bridge, &mcp_qt::McpAppBridge::displayModeChanged,
+                     [&](const QString& m) { modeChanged = true; changedMode = m; });
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), 2},
+        {QStringLiteral("method"), QStringLiteral("ui/request-display-mode")},
+        {QStringLiteral("params"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("fullscreen")}}}
+    });
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 1, "should respond to request-display-mode");
+    if (renderer.sentMessages.isEmpty()) return;
+    const QJsonObject result1 = renderer.sentMessages.first().value(QStringLiteral("result")).toObject();
+    TM_ASSERT_TRUE(result1.value(QStringLiteral("mode")).toString() == QStringLiteral("fullscreen"), "advertised+supported mode should be accepted");
+    TM_ASSERT_TRUE(modeChanged && changedMode == QStringLiteral("fullscreen"), "displayModeChanged signal should fire");
+
+    // 请求 App 未声明的 inline → 拒绝，返回当前实际模式（fullscreen）
+    renderer.sentMessages.clear();
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), 3},
+        {QStringLiteral("method"), QStringLiteral("ui/request-display-mode")},
+        {QStringLiteral("params"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("inline")}}}
+    });
+    const QJsonObject result2 = renderer.sentMessages.first().value(QStringLiteral("result")).toObject();
+    TM_ASSERT_TRUE(result2.value(QStringLiteral("mode")).toString() == QStringLiteral("fullscreen"), "mode not advertised by App should fall back to current mode");
+}
+
+// notifications/message → appLogMessage 信号
+void test_qt_mcp_app_bridge_app_log_signal() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.start();
+
+    QJsonObject gotParams;
+    QObject::connect(&bridge, &mcp_qt::McpAppBridge::appLogMessage,
+                     [&](const QJsonObject& p) { gotParams = p; });
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("notifications/message")},
+        {QStringLiteral("params"), QJsonObject{{QStringLiteral("level"), QStringLiteral("info")},
+                                               {QStringLiteral("data"), QStringLiteral("hello")}}}
+    });
+    TM_ASSERT_TRUE(gotParams.value(QStringLiteral("data")).toString() == QStringLiteral("hello"), "appLogMessage signal should carry params");
+}
+
+// teardown 等待响应：发出带 id 的请求，App 响应后回调 ok=true
+void test_qt_mcp_app_bridge_teardown_waits_response() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.start();
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("ui/notifications/initialized")},
+        {QStringLiteral("params"), QJsonObject{}}
+    });
+
+    bool called = false;
+    bool okResult = false;
+    bridge.teardownResource(QStringLiteral("bye"), [&](bool ok, const QJsonObject&, const QJsonObject&) {
+        called = true; okResult = ok;
+    });
+
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 1, "should send teardown request");
+    if (renderer.sentMessages.isEmpty()) return;
+    const QJsonObject req = renderer.sentMessages.first();
+    TM_ASSERT_TRUE(req.value(QStringLiteral("method")).toString() == QStringLiteral("ui/resource-teardown"), "method should be ui/resource-teardown");
+    const qint64 id = req.value(QStringLiteral("id")).toVariant().toLongLong();
+    TM_ASSERT_TRUE(id >= 1, "teardown request should carry an id");
+
+    // App 响应
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), id},
+        {QStringLiteral("result"), QJsonObject{}}
+    });
+    TM_ASSERT_TRUE(called, "callback should fire on App response");
+    TM_ASSERT_TRUE(okResult, "ok should be true on successful response");
+}
+
+// teardown 超时：App 未响应，2s 后回调 ok=false
+void test_qt_mcp_app_bridge_teardown_timeout() {
+    MockAppRenderer renderer;
+    mcp_qt::McpAppBridge bridge;
+    bridge.attach(&renderer, nullptr);
+    bridge.start();
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("ui/notifications/initialized")},
+        {QStringLiteral("params"), QJsonObject{}}
+    });
+
+    bool called = false;
+    bool okResult = true;
+    bridge.teardownResource(QStringLiteral("bye"), [&](bool ok, const QJsonObject&, const QJsonObject&) {
+        called = true; okResult = ok;
+    });
+    waitEvents(2100);  // 不响应，等待超时
+    TM_ASSERT_TRUE(called, "timeout should fire the callback");
+    TM_ASSERT_FALSE(okResult, "timeout should report ok=false");
 }
