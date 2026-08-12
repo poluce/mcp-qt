@@ -785,25 +785,6 @@ void McpClientSession::discoverServer(std::function<void(const McpServerDiscover
     });
 }
 
-McpServerDiscovery McpClientSession::discoverServerSync(std::chrono::milliseconds timeout, json* errorOut) {
-    struct DiscoverResult {
-        McpServerDiscovery info;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<DiscoverResult>>();
-    auto fut = pr->get_future();
-    discoverServer([pr](const McpServerDiscovery& info, const json& error) {
-        pr->set_value({info, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.error;
-        return res.info;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous discoverServer timed out"}};
-    return {};
-}
-
 void McpClientSession::listTools(std::function<void(const std::vector<McpTool>& tools, const json& error)> callback) {
     listTools("", [callback](const std::vector<McpTool>& tools, const std::string&, const json& error) {
         callback(tools, error);
@@ -1070,36 +1051,6 @@ void McpClientSession::checkRequestTimeouts(std::chrono::milliseconds timeoutLim
     }
 }
 
-bool McpClientSession::initializeSync(const std::string& clientName, const std::string& clientVersion,
-                                      json* serverInfoOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    initialize(clientName, clientVersion, [pr](bool success, const json& info) {
-        pr->set_value({success, info});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (serverInfoOut) *serverInfoOut = res.second;
-        return res.first;
-    }
-    if (serverInfoOut) {
-        *serverInfoOut = {{"code", kErrorTimeout}, {"message", "Synchronous initialize timed out"}};
-    }
-    return false;
-}
-
-bool McpClientSession::shutdownSync(std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<bool>>();
-    auto fut = pr->get_future();
-    shutdown([pr](bool success) {
-        pr->set_value(success);
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        return fut.get();
-    }
-    return false;
-}
-
 std::vector<McpTool> McpClientSession::listToolsSync(std::chrono::milliseconds timeout, json* errorOut) {
     auto pr = std::make_shared<std::promise<std::pair<std::vector<McpTool>, json>>>();
     auto fut = pr->get_future();
@@ -1113,180 +1064,6 @@ std::vector<McpTool> McpClientSession::listToolsSync(std::chrono::milliseconds t
     }
     if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listTools timed out"}};
     return {};
-}
-
-std::vector<McpTool> McpClientSession::listToolsSync(const std::string& cursor, std::string* nextCursorOut,
-                                                     std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListToolsResult {
-        std::vector<McpTool> tools;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListToolsResult>>();
-    auto fut = pr->get_future();
-    listTools(cursor, [pr](const std::vector<McpTool>& tools, const std::string& nextCursor, const json& error) {
-        pr->set_value({tools, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.tools;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listTools with cursor timed out"}};
-    return {};
-}
-
-json McpClientSession::callToolSync(const std::string& name, const json& arguments,
-                                    json* errorOut, std::chrono::milliseconds timeout,
-                                    ProgressCallback progressCallback) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    callTool(name, arguments, [pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    }, std::move(progressCallback));
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous callTool timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listResourcesSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    listResources([pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listResources timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listResourcesSync(const std::string& cursor, std::string* nextCursorOut,
-                                         std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListResourcesResult {
-        json result;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListResourcesResult>>();
-    auto fut = pr->get_future();
-    listResources(cursor, [pr](const json& result, const std::string& nextCursor, const json& error) {
-        pr->set_value({result, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listResources with cursor timed out"}};
-    return json::object();
-}
-
-json McpClientSession::readResourceSync(const std::string& uri, json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    readResource(uri, [pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous readResource timed out"}};
-    return json::object();
-}
-
-bool McpClientSession::subscribeResourceSync(const std::string& uri, json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    subscribeResource(uri, [pr](bool success, const json& error) {
-        pr->set_value({success, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous subscribeResource timed out"}};
-    return false;
-}
-
-bool McpClientSession::unsubscribeResourceSync(const std::string& uri, json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    unsubscribeResource(uri, [pr](bool success, const json& error) {
-        pr->set_value({success, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous unsubscribeResource timed out"}};
-    return false;
-}
-
-json McpClientSession::listPromptsSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    listPrompts([pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listPrompts timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listPromptsSync(const std::string& cursor, std::string* nextCursorOut,
-                                       std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListPromptsResult {
-        json result;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListPromptsResult>>();
-    auto fut = pr->get_future();
-    listPrompts(cursor, [pr](const json& result, const std::string& nextCursor, const json& error) {
-        pr->set_value({result, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listPrompts with cursor timed out"}};
-    return json::object();
-}
-
-json McpClientSession::getPromptSync(const std::string& name, const json& arguments,
-                                     json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    getPrompt(name, arguments, [pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous getPrompt timed out"}};
-    return json::object();
 }
 
 int64_t McpClientSession::sendRequestRaw(const std::string& method, const std::string& paramsJson, RawResponseCallback callback) {
@@ -1322,22 +1099,6 @@ void McpClientSession::callToolRaw(const std::string& name, const std::string& a
     });
 }
 
-std::string McpClientSession::callToolSyncRaw(const std::string& name, const std::string& argumentsJson,
-                                              std::string* errorJsonOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<std::string, std::string>>>();
-    auto fut = pr->get_future();
-    callToolRaw(name, argumentsJson, [pr](const std::string& res, const std::string& err) {
-        pr->set_value({res, err});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorJsonOut) *errorJsonOut = res.second;
-        return res.first;
-    }
-    if (errorJsonOut) *errorJsonOut = "{\"code\":-32900,\"message\":\"Synchronous callToolRaw timed out\"}";
-    return "{}";
-}
-
 // ==========================================
 // Ping
 // ==========================================
@@ -1360,21 +1121,6 @@ void McpClientSession::ping(std::function<void(bool success, const json& error)>
             callback(true, json::object());
         }
     });
-}
-
-bool McpClientSession::pingSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    ping([pr](bool success, const json& error) {
-        pr->set_value({success, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous ping timed out"}};
-    return false;
 }
 
 // ==========================================
@@ -1423,43 +1169,6 @@ void McpClientSession::listResourceTemplates(const std::string& cursor, std::fun
     });
 }
 
-std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<std::vector<McpResourceTemplate>, json>>>();
-    auto fut = pr->get_future();
-    listResourceTemplates([pr](const std::vector<McpResourceTemplate>& templates, const json& error) {
-        pr->set_value({templates, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listResourceTemplates timed out"}};
-    return {};
-}
-
-std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(const std::string& cursor, std::string* nextCursorOut,
-                                                                             std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListTemplatesResult {
-        std::vector<McpResourceTemplate> templates;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListTemplatesResult>>();
-    auto fut = pr->get_future();
-    listResourceTemplates(cursor, [pr](const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error) {
-        pr->set_value({templates, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.templates;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listResourceTemplates with cursor timed out"}};
-    return {};
-}
-
 // ==========================================
 // Completion (auto-complete)
 // ==========================================
@@ -1476,22 +1185,6 @@ void McpClientSession::complete(const json& ref, const json& argument, std::func
     sendRequest("completion/complete", params, [callback](const json& result, const json& error) {
         callback(result, error);
     });
-}
-
-json McpClientSession::completeSync(const json& ref, const json& argument,
-                                    json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    complete(ref, argument, [pr](const json& completion, const json& error) {
-        pr->set_value({completion, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous complete timed out"}};
-    return json::object();
 }
 
 // ==========================================
@@ -1808,133 +1501,6 @@ void McpClientSession::readResourceWithCache(const std::string& uri, std::functi
     sendRequest("resources/read", params, [callback](const json& result, const json& error) {
         callback(result, parseCacheHint(result), error);
     });
-}
-
-std::vector<McpTool> McpClientSession::listToolsWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                                              McpCacheHint* hintOut, std::chrono::milliseconds timeout, json* errorOut) {
-    struct R {
-        std::vector<McpTool> tools;
-        std::string nextCursor;
-        McpCacheHint hint;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<R>>();
-    auto fut = pr->get_future();
-    listToolsWithCache(cursor, [pr](const std::vector<McpTool>& tools, const std::string& nextCursor, const McpCacheHint& hint, const json& error) {
-        pr->set_value({tools, nextCursor, hint, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (hintOut) *hintOut = res.hint;
-        if (errorOut) *errorOut = res.error;
-        return res.tools;
-    }
-    if (nextCursorOut) *nextCursorOut = "";
-    if (hintOut) *hintOut = McpCacheHint{};
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listToolsWithCache timed out"}};
-    return {};
-}
-
-json McpClientSession::listResourcesWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                                  McpCacheHint* hintOut, std::chrono::milliseconds timeout, json* errorOut) {
-    struct R {
-        json result;
-        std::string nextCursor;
-        McpCacheHint hint;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<R>>();
-    auto fut = pr->get_future();
-    listResourcesWithCache(cursor, [pr](const json& result, const std::string& nextCursor, const McpCacheHint& hint, const json& error) {
-        pr->set_value({result, nextCursor, hint, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (hintOut) *hintOut = res.hint;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (nextCursorOut) *nextCursorOut = "";
-    if (hintOut) *hintOut = McpCacheHint{};
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listResourcesWithCache timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listPromptsWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                                McpCacheHint* hintOut, std::chrono::milliseconds timeout, json* errorOut) {
-    struct R {
-        json result;
-        std::string nextCursor;
-        McpCacheHint hint;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<R>>();
-    auto fut = pr->get_future();
-    listPromptsWithCache(cursor, [pr](const json& result, const std::string& nextCursor, const McpCacheHint& hint, const json& error) {
-        pr->set_value({result, nextCursor, hint, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (hintOut) *hintOut = res.hint;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (nextCursorOut) *nextCursorOut = "";
-    if (hintOut) *hintOut = McpCacheHint{};
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listPromptsWithCache timed out"}};
-    return json::object();
-}
-
-std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                                                                      McpCacheHint* hintOut, std::chrono::milliseconds timeout, json* errorOut) {
-    struct R {
-        std::vector<McpResourceTemplate> templates;
-        std::string nextCursor;
-        McpCacheHint hint;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<R>>();
-    auto fut = pr->get_future();
-    listResourceTemplatesWithCache(cursor, [pr](const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const McpCacheHint& hint, const json& error) {
-        pr->set_value({templates, nextCursor, hint, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (hintOut) *hintOut = res.hint;
-        if (errorOut) *errorOut = res.error;
-        return res.templates;
-    }
-    if (nextCursorOut) *nextCursorOut = "";
-    if (hintOut) *hintOut = McpCacheHint{};
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listResourceTemplatesWithCache timed out"}};
-    return {};
-}
-
-json McpClientSession::readResourceWithCacheSync(const std::string& uri, McpCacheHint* hintOut,
-                                                 json* errorOut, std::chrono::milliseconds timeout) {
-    struct R {
-        json result;
-        McpCacheHint hint;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<R>>();
-    auto fut = pr->get_future();
-    readResourceWithCache(uri, [pr](const json& result, const McpCacheHint& hint, const json& error) {
-        pr->set_value({result, hint, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (hintOut) *hintOut = res.hint;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (hintOut) *hintOut = McpCacheHint{};
-    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous readResourceWithCache timed out"}};
-    return json::object();
 }
 
 // ==========================================

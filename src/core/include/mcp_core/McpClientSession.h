@@ -174,7 +174,7 @@ public:
      *   session->init();
      *   session->start();
      *
-     * After connect(), call initializeSync() to complete the handshake.
+     * After connect(), call initialize() to complete the handshake.
      */
     static std::shared_ptr<McpClientSession> connect(std::shared_ptr<IMcpTransport> transport);
 
@@ -243,11 +243,6 @@ public:
      *        RPCs when operating without the legacy initialize handshake.
      */
     void discoverServer(std::function<void(const McpServerDiscovery& info, const json& error)> callback);
-
-    /**
-     * @brief Synchronous variant of discoverServer().
-     */
-    McpServerDiscovery discoverServerSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(10000), json* errorOut = nullptr);
 
     /**
      * @brief List the tools exposed by the MCP server.
@@ -437,52 +432,7 @@ public:
     // Synchronous Blocking APIs (Helper wrappers)
     // ==========================================
     
-    bool initializeSync(const std::string& clientName, const std::string& clientVersion,
-                        json* serverInfoOut = nullptr,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    bool shutdownSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
     std::vector<McpTool> listToolsSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-    
-    std::vector<McpTool> listToolsSync(const std::string& cursor, std::string* nextCursorOut,
-                                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json callToolSync(const std::string& name, const json& arguments,
-                      json* errorOut = nullptr,
-                      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
-                      ProgressCallback progressCallback = nullptr);
-
-    json listResourcesSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-    
-    json listResourcesSync(const std::string& cursor, std::string* nextCursorOut,
-                           std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json readResourceSync(const std::string& uri, json* errorOut = nullptr, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    bool subscribeResourceSync(const std::string& uri, json* errorOut = nullptr, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    bool unsubscribeResourceSync(const std::string& uri, json* errorOut = nullptr, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    json listPromptsSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-    
-    json listPromptsSync(const std::string& cursor, std::string* nextCursorOut,
-                         std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json getPromptSync(const std::string& name, const json& arguments,
-                       json* errorOut = nullptr,
-                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    bool pingSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    std::vector<McpResourceTemplate> listResourceTemplatesSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    std::vector<McpResourceTemplate> listResourceTemplatesSync(const std::string& cursor, std::string* nextCursorOut,
-                                                               std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json completeSync(const json& ref, const json& argument,
-                      json* errorOut = nullptr,
-                      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
     // ==========================================
     // CacheableResult (MCP 2026-07-28): list/read 结果携带 ttlMs/cacheScope
@@ -498,26 +448,6 @@ public:
 
     void readResourceWithCache(const std::string& uri, std::function<void(const json& result, const McpCacheHint& hint, const json& error)> callback);
 
-    std::vector<McpTool> listToolsWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                                McpCacheHint* hintOut = nullptr,
-                                                std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json listResourcesWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                    McpCacheHint* hintOut = nullptr,
-                                    std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json listPromptsWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                  McpCacheHint* hintOut = nullptr,
-                                  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    std::vector<McpResourceTemplate> listResourceTemplatesWithCacheSync(const std::string& cursor, std::string* nextCursorOut,
-                                                                        McpCacheHint* hintOut = nullptr,
-                                                                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json readResourceWithCacheSync(const std::string& uri, McpCacheHint* hintOut = nullptr,
-                                   json* errorOut = nullptr,
-                                   std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
     // ==========================================
     // Raw String APIs (Uncoupled from nlohmann/json)
     // ==========================================
@@ -527,10 +457,6 @@ public:
     
     void callToolRaw(const std::string& name, const std::string& argumentsJson,
                      std::function<void(const std::string& contentJson, const std::string& errorJson)> callback);
-                     
-    std::string callToolSyncRaw(const std::string& name, const std::string& argumentsJson,
-                                std::string* errorJsonOut = nullptr,
-                                std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
     void setLogCallback(LogCallback callback);
 
