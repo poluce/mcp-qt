@@ -631,6 +631,8 @@ private:
         {"sampling", json::object()},
         {"elicitation", {{"modes", {"form", "url"}}}}
     };
+    // 无状态模式或已协商 2026-07-28 协议：统一走新协议语义
+    bool modernMode() const { return m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28"; }
     bool m_statelessMode{false};
     std::string m_requestLogLevel;  // 2026-07-28 per-request logLevel（空=不注入）
     std::string m_clientName{"mcp-qt-client"};

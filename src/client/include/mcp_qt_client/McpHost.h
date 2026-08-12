@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QJsonArray>
 #include <QMap>
+#include <functional>
 
 namespace mcp_qt {
 
@@ -81,6 +82,8 @@ private:
     bool persistServerObject(const QString& serverName, const QJsonObject& obj);
     bool persistRemoveServer(const QString& serverName);
     QJsonObject serializeServerConfig(const McpServerConfig& cfg) const;
+    // 读-改-写 mcpServers 配置：allowMissing 时文件缺失则从空对象开始；mutate 返回 false 不写回。
+    bool readWriteConfig(bool allowMissing, const std::function<bool(QJsonObject&)>& mutate);
 
     McpServerManager* m_manager;
     McpToolRouter* m_toolRouter;

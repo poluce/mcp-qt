@@ -218,6 +218,23 @@ private:
     bool m_locked{false};
 };
 
+// OAuth token 响应解析（access_token + 可选 refresh_token/expires_in）
+static mcp::OAuthToken _tokenFromResponse(const nlohmann::json& rj) {
+    mcp::OAuthToken t;
+    t.accessToken = rj["access_token"].get<std::string>();
+    if (rj.contains("refresh_token") && rj["refresh_token"].is_string())
+        t.refreshToken = rj["refresh_token"].get<std::string>();
+    if (rj.contains("expires_in") && rj["expires_in"].is_number_integer())
+        t.expiresIn = rj["expires_in"].get<int>();
+    t.obtainedAt = std::chrono::steady_clock::now();
+    return t;
+}
+
+// client_secret_basic：凭据放 Authorization 头（RFC 6749 §2.3.1）
+static QByteArray _basicAuthHeader(const std::string& id, const std::string& secret) {
+    return "Basic " + QByteArray::fromStdString(id + ":" + secret).toBase64();
+}
+
 // 用已有 refresh_token 通过 refresh_token grant（RFC 6749 §6）静默续期。
 // 仅在持有流程锁时调用。成功返回 true 并更新当前 token。
 static bool _refreshTokenQt(const std::string& tokenEndpoint,
@@ -234,7 +251,7 @@ static bool _refreshTokenQt(const std::string& tokenEndpoint,
     QMap<QByteArray, QByteArray> th;
     if (!clientSecret.empty()) {
         // client_secret_basic：凭据放 Authorization 头
-        th["Authorization"] = "Basic " + QByteArray::fromStdString(clientId + ":" + clientSecret).toBase64();
+        th["Authorization"] = _basicAuthHeader(clientId, clientSecret);
     } else {
         q.addQueryItem("client_secret", QString::fromStdString(clientSecret));
     }
@@ -242,13 +259,7 @@ static bool _refreshTokenQt(const std::string& tokenEndpoint,
                              q.query(QUrl::FullyEncoded).toUtf8(), th);
     auto rj = nlohmann::json::parse(resp.toStdString(), nullptr, false);
     if (rj.is_discarded() || !rj.contains("access_token")) return false;
-    mcp::OAuthToken rt;
-    rt.accessToken = rj["access_token"].get<std::string>();
-    if (rj.contains("refresh_token") && rj["refresh_token"].is_string())
-        rt.refreshToken = rj["refresh_token"].get<std::string>();
-    if (rj.contains("expires_in") && rj["expires_in"].is_number_integer())
-        rt.expiresIn = rj["expires_in"].get<int>();
-    rt.obtainedAt = std::chrono::steady_clock::now();
+    mcp::OAuthToken rt = _tokenFromResponse(rj);
     oc->setCurrentToken(rt);
     return true;
 }
@@ -357,9 +368,9 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
         std::string a=ctx["idp_id_token"].get<std::string>();
         QByteArray pf=QByteArray("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=")+QByteArray::fromStdString(a)+"&resource="+QUrl::toPercentEncoding(QString::fromStdString(sseUrl));
         QMap<QByteArray,QByteArray> hdrs;
-        if(!csc.empty()){hdrs["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();}
+        if(!csc.empty()){hdrs["Authorization"]=_basicAuthHeader(cid, csc);}
         QByteArray resp=_postH(QString::fromStdString(mm.tokenEndpoint),pf,hdrs);
-        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();if(tj.contains("expires_in")&&tj["expires_in"].is_number_integer())t.expiresIn=tj["expires_in"].get<int>();if(tj.contains("refresh_token")&&tj["refresh_token"].is_string())t.refreshToken=tj["refresh_token"].get<std::string>();t.obtainedAt=std::chrono::steady_clock::now();oc->setCurrentToken(t);return true;}return false;
+        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t=_tokenFromResponse(tj);oc->setCurrentToken(t);return true;}return false;
     }
 
     // 5) Client Credentials（当 context 有 client_id 且支持 client_credentials grant 时）
@@ -408,10 +419,10 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
                 + QUrl::toPercentEncoding(QString::fromStdString(assertion))
                 + "&resource="+QUrl::toPercentEncoding(QString::fromStdString(sseUrl));
             QMap<QByteArray,QByteArray> hdrs;
-            if(!csc.empty()){hdrs["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();}
+            if(!csc.empty()){hdrs["Authorization"]=_basicAuthHeader(cid, csc);}
             QByteArray resp=_postH(QString::fromStdString(mm.tokenEndpoint),pf,hdrs);
             auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);
-            if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();if(tj.contains("expires_in")&&tj["expires_in"].is_number_integer())t.expiresIn=tj["expires_in"].get<int>();if(tj.contains("refresh_token")&&tj["refresh_token"].is_string())t.refreshToken=tj["refresh_token"].get<std::string>();t.obtainedAt=std::chrono::steady_clock::now();oc->setCurrentToken(t);return true;}
+            if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t=_tokenFromResponse(tj);oc->setCurrentToken(t);return true;}
             std::cerr << "[OAuth] private_key_jwt token exchange failed: "
                       << resp.toStdString().substr(0, 200) << std::endl;
             return false;
@@ -419,9 +430,9 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
         std::cerr << "[OAuth] Using Client Credentials grant" << std::endl;
         QByteArray pf=QByteArray::fromStdString("grant_type=client_credentials&client_id="+cid+"&client_secret="+csc)+"&resource="+QUrl::toPercentEncoding(QString::fromStdString(sseUrl));
         QMap<QByteArray,QByteArray> hdrs;
-        if(!csc.empty()){hdrs["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();}
+        if(!csc.empty()){hdrs["Authorization"]=_basicAuthHeader(cid, csc);}
         QByteArray resp=_postH(QString::fromStdString(mm.tokenEndpoint),pf,hdrs);
-        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t;t.accessToken=tj["access_token"].get<std::string>();if(tj.contains("expires_in")&&tj["expires_in"].is_number_integer())t.expiresIn=tj["expires_in"].get<int>();if(tj.contains("refresh_token")&&tj["refresh_token"].is_string())t.refreshToken=tj["refresh_token"].get<std::string>();t.obtainedAt=std::chrono::steady_clock::now();oc->setCurrentToken(t);return true;}return false;
+        auto tj=nlohmann::json::parse(resp.toStdString(),nullptr,false);if(!tj.is_discarded()&&tj.contains("access_token")){mcp::OAuthToken t=_tokenFromResponse(tj);oc->setCurrentToken(t);return true;}return false;
     }
 
     // 6) Authorization Code + PKCE
@@ -481,13 +492,11 @@ static bool _runOAuthQt(const std::string& sseUrl, const nlohmann::json& ctx,
     q.addQueryItem("code",cd);q.addQueryItem("code_verifier",QString::fromStdString(ar.codeVerifier));q.addQueryItem("grant_type","authorization_code");
     q.addQueryItem("redirect_uri",redirectUri);q.addQueryItem("resource",QString::fromStdString(sseUrl));
     QMap<QByteArray,QByteArray> th;
-    if(ub&&!csc.empty())th["Authorization"]="Basic "+QByteArray::fromStdString(cid+":"+csc).toBase64();
+    if(ub&&!csc.empty())th["Authorization"]=_basicAuthHeader(cid, csc);
     QByteArray tb=_postH(QString::fromStdString(mm.tokenEndpoint),q.query(QUrl::FullyEncoded).toUtf8(),th);
     auto tj=nlohmann::json::parse(tb.toStdString(),nullptr,false);
     if(tj.is_discarded()||!tj.contains("access_token"))return false;
-    mcp::OAuthToken tk;tk.accessToken=tj["access_token"].get<std::string>();
-    if(tj.contains("refresh_token"))tk.refreshToken=tj["refresh_token"].get<std::string>();
-    tk.expiresIn=tj.value("expires_in",0);tk.obtainedAt=std::chrono::steady_clock::now();
+    mcp::OAuthToken tk=_tokenFromResponse(tj);
     oc->setCurrentToken(tk);return true;
 }
 
@@ -848,7 +857,7 @@ bool McpQtClient::doInitializeAndWait(const QString& name,const QString& ver,int
                 quit();
             });
         }, std::min(to, 3000));
-        m_initialized=true; emit connected(); return true;
+        emit connected(); return true;
     }
     auto initOkPtr = std::make_shared<bool>(false);
     bool ok = runSyncWithTimeout([initOkPtr, name, ver, this](auto quit) {
@@ -859,19 +868,8 @@ bool McpQtClient::doInitializeAndWait(const QString& name,const QString& ver,int
     }, to);
 
     if(!ok || !(*initOkPtr)){ if(err)*err="Initialization timeout or failure"; emit errorOccurred(mcp_qt::McpError{-1, *err, QJsonObject{}}); return false; }
-    m_initialized=true;emit connected();return true;
+    emit connected();return true;
 }
-bool McpQtClient::doOAuth(const OAuthConfig& oa){
-    QNetworkAccessManager n;QNetworkRequest r{QUrl{oa.serverUrl}};QNetworkReply* p=n.get(r,QByteArray());
-    QEventLoop l;QObject::connect(p,&QNetworkReply::finished,&l,&QEventLoop::quit);l.exec();
-    QByteArray w=p->rawHeader("WWW-Authenticate");p->deleteLater();
-    if(w.isEmpty())return true;
-    nlohmann::json ctx;
-    if(!oa.clientId.isEmpty())ctx["client_id"]=oa.clientId.toStdString();
-    if(!oa.clientSecret.isEmpty())ctx["client_secret"]=oa.clientSecret.toStdString();
-    return _runOAuthQt(oa.serverUrl.toStdString(),ctx,w.toStdString(),m_oauth,oa.redirectUri);
-}
-
 bool McpQtClient::runOAuthFlow(const std::string& serverUrl,
                                const nlohmann::json& context,
                                const std::string& wwwAuth,
@@ -926,9 +924,9 @@ void McpQtClient::discoverServerAsync(std::function<void(const DiscoverInfo&, co
     });
 }
 
-bool McpQtClient::hasToolsCapability() const { return serverCapabilities().contains("tools"); }
-bool McpQtClient::hasPromptsCapability() const { return serverCapabilities().contains("prompts"); }
-bool McpQtClient::hasResourcesCapability() const { return serverCapabilities().contains("resources"); }
+bool McpQtClient::hasToolsCapability() const { return m_session && m_session->getServerCapabilities().contains("tools"); }
+bool McpQtClient::hasPromptsCapability() const { return m_session && m_session->getServerCapabilities().contains("prompts"); }
+bool McpQtClient::hasResourcesCapability() const { return m_session && m_session->getServerCapabilities().contains("resources"); }
 
 // ========== Tools ==========
 static std::vector<McpQtTool> _cvt(const std::vector<mcp::McpTool>& src) { std::vector<McpQtTool> r; for(const auto& t:src){ r.push_back({QString::fromStdString(t.name), QString::fromStdString(t.description), _qj(t.inputSchema), _qj(t.meta)}); } return r; }
@@ -1935,7 +1933,6 @@ void McpQtClient::listResourceTemplatesAsync(const QString& cursor, std::functio
 std::unique_ptr<McpResourceTemplatesModel> McpQtClient::createResourceTemplatesModel(QObject* parent) {
     auto model = std::make_unique<McpResourceTemplatesModel>(parent);
     model->setClient(this);
-    m_templatesModels.append(model.get());
     return model;
 }
 
@@ -2338,7 +2335,7 @@ int64_t McpQtClient::sendRequest(const QString& m,const QJsonObject& p, QObject*
         }
         else { onP(pt,tt,msg); }
     }):nullptr;
-    int64_t id = m_session->sendRequest(m.toStdString(),_nl(p),[this, cb, pCtx, hasCtx, replayable, m, p, onP, requestId](const nlohmann::json& r,const nlohmann::json& e){
+    int64_t id = m_session->sendRequest(m.toStdString(),_nl(p),[this, cb, pCtx, hasCtx, replayable, requestId](const nlohmann::json& r,const nlohmann::json& e){
         if (replayable
             && !m_isUserClosed
             && m_reconnectPolicy.enabled
@@ -2430,7 +2427,6 @@ void McpQtClient::close(int to){
         m_session->close();
         m_session.reset();
     }
-    m_initialized=false;
     emit disconnected();
 }
 
@@ -2640,69 +2636,7 @@ void McpQtClient::refreshToolsCacheAsync() {
 }
 
 void McpQtClient::fetchAllToolsAsync() {
-    constexpr int kMaxPages = 50;
-    struct Helper {
-        static void fetchPage(QPointer<McpQtClient> safeClient, QString cursor,
-                              std::shared_ptr<std::vector<McpQtTool>> accumulated,
-                              std::shared_ptr<std::once_flag> doneFlag,
-                              uint64_t fetchId, int depth) {
-            if (!safeClient) return;
-            if (depth >= kMaxPages) {
-                qWarning() << "[McpQtClient] fetchAllToolsAsync: exceeded max pages (" << kMaxPages << "), aborting pagination";
-                fireDone(safeClient, accumulated, doneFlag, fetchId);
-                return;
-            }
-            safeClient->listToolsAsync(cursor, [safeClient, accumulated, doneFlag, fetchId, depth](const std::vector<McpQtTool>& tools, const QString& nextCursor, const QString& error) {
-                if (!safeClient) return;
-                if (!error.isEmpty()) {
-                    qWarning() << "[McpQtClient] fetchAllToolsAsync page error:" << error;
-                    return;
-                }
-                accumulated->insert(accumulated->end(), tools.begin(), tools.end());
-                if (!nextCursor.isEmpty()) {
-                    fetchPage(safeClient, nextCursor, accumulated, doneFlag, fetchId, depth + 1);
-                } else {
-                    fireDone(safeClient, accumulated, doneFlag, fetchId);
-                }
-            });
-        }
-
-        static void fireDone(QPointer<McpQtClient> safeClient,
-                             std::shared_ptr<std::vector<McpQtTool>> accumulated,
-                             std::shared_ptr<std::once_flag> doneFlag,
-                             uint64_t fetchId) {
-            std::call_once(*doneFlag, [safeClient, accumulated, fetchId]() {
-                if (safeClient) {
-                    // 任务已完成，注销兜底回调，释放捕获的 accumulated 内存
-                    {
-                        std::lock_guard<std::mutex> lock(safeClient->m_pendingFetchMutex);
-                        safeClient->m_pendingFetchCallbacks.erase(fetchId);
-                    }
-                    for (const auto& t : *accumulated) {
-                        safeClient->m_toolCache[t.name] = t;
-                    }
-                    emit safeClient->toolsReady(*accumulated);
-                    emit safeClient->toolsChanged(*accumulated);
-                }
-            });
-        }
-    };
-
-    auto accumulated = std::make_shared<std::vector<McpQtTool>>();
-    auto doneFlag = std::make_shared<std::once_flag>();
-    uint64_t fetchId = m_nextFetchId.fetch_add(1);
-
-    // 注册析构时兜底回调：客户端被销毁时强制触发
-    auto safeThis = QPointer<McpQtClient>(this);
-    auto rescueCb = [safeThis, accumulated, doneFlag, fetchId]() {
-        Helper::fireDone(safeThis, accumulated, doneFlag, fetchId);
-    };
-    {
-        std::lock_guard<std::mutex> lock(m_pendingFetchMutex);
-        m_pendingFetchCallbacks[fetchId] = std::move(rescueCb);
-    }
-
-    Helper::fetchPage(QPointer<McpQtClient>(this), QStringLiteral(""), accumulated, doneFlag, fetchId, 0);
+    fetchAllToolsAsync({});
 }
 
 void McpQtClient::fetchAllToolsAsync(std::function<void(const std::vector<McpQtTool>&)> callback) {
@@ -2723,7 +2657,7 @@ void McpQtClient::fetchAllToolsAsync(std::function<void(const std::vector<McpQtT
                 if (!safeClient) return;
                 if (!error.isEmpty()) {
                     qWarning() << "[McpQtClient] fetchAllToolsAsync page error:" << error;
-                    fireDone(safeClient, accumulated, cb, doneFlag, fetchId);
+                    if (*cb) fireDone(safeClient, accumulated, cb, doneFlag, fetchId);
                     return;
                 }
                 accumulated->insert(accumulated->end(), tools.begin(), tools.end());
@@ -2973,7 +2907,6 @@ void McpQtClient::doDiscoverAsync() {
         }
         // discover 仅为信息获取；无状态连接无需握手即已就绪。
         QMetaObject::invokeMethod(this, [this]() {
-            m_initialized = true;
             emit connected();
         }, Qt::QueuedConnection);
     });
@@ -2989,7 +2922,6 @@ void McpQtClient::doInitializeAsync(const QString& name, const QString& ver) {
             }, Qt::QueuedConnection);
         } else {
             QMetaObject::invokeMethod(this, [this]() {
-                m_initialized = true;
                 emit connected();
             }, Qt::QueuedConnection);
         }

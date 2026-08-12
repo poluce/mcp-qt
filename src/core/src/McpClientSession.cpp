@@ -395,8 +395,8 @@ void McpClientSession::handleResponse(const json& responseJson) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_pendingRequests.find(id);
         if (it != m_pendingRequests.end()) {
-            reqMethod = it->second.method;
-            reqParams = it->second.params;
+            reqMethod = std::move(it->second.method);
+            reqParams = std::move(it->second.params);
             cb = std::move(it->second.callback);
             m_pendingRequests.erase(it);
             found = true;
@@ -1343,7 +1343,7 @@ std::string McpClientSession::callToolSyncRaw(const std::string& name, const std
 // ==========================================
 
 void McpClientSession::ping(std::function<void(bool success, const json& error)> callback) {
-    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+    if (modernMode()) {
         // MCP 2026-07-28 已移除 ping 方法（SEP-2575/2567）
         log(LogLevel::Warning, "ping removed in 2026-07-28; Method not found");
         callback(false, {{"code", -32601}, {"message", "Method not found: ping"}});
@@ -1499,7 +1499,7 @@ json McpClientSession::completeSync(const json& ref, const json& argument,
 // ==========================================
 
 void McpClientSession::setSamplingHandler(SamplingHandler handler) {
-    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+    if (modernMode()) {
         log(LogLevel::Warning, "Feature 'sampling' is deprecated in MCP 2026-07-28 specification but maintained for backwards compatibility.");
     }
     {
@@ -1574,7 +1574,7 @@ void McpClientSession::setElicitationHandler(ElicitationHandler handler) {
 // ==========================================
 
 void McpClientSession::setRootsProvider(RootsProvider provider) {
-    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+    if (modernMode()) {
         log(LogLevel::Warning, "Feature 'roots' is deprecated in MCP 2026-07-28 specification but maintained for backwards compatibility.");
     }
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -1587,7 +1587,7 @@ void McpClientSession::setMrtrHandler(MrtrInputHandler handler) {
 }
 
 void McpClientSession::injectStatelessMeta(json& params) {
-    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+    if (modernMode()) {
         if (!params.is_object()) {
             params = json::object();
         }
@@ -1633,7 +1633,7 @@ void McpClientSession::resendMrtrRequest(const std::string& method, json params,
 }
 
 void McpClientSession::notifyRootsListChanged() {
-    if (m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28") {
+    if (modernMode()) {
         // MCP 2026-07-28 已移除 roots/list_changed 通知（SEP-2575/2567）：
         // 不发送，仅记录日志警告。
         log(LogLevel::Warning, "notifications/roots/list_changed removed in 2026-07-28; notification suppressed");
@@ -2045,7 +2045,7 @@ bool McpClientSession::isStatelessMode() const {
 }
 
 bool McpClientSession::isReady() const {
-    return m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28" || m_state == SessionState::Initialized;
+    return modernMode() || m_state == SessionState::Initialized;
 }
 
 void McpClientSession::log(LogLevel level, const std::string& message) {

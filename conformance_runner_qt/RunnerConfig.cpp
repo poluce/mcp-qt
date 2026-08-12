@@ -16,7 +16,6 @@ bool parseRunnerConfig(
         const std::string arg(argv[i]);
         if (arg.rfind("http://", 0) == 0 || arg.rfind("https://", 0) == 0) {
             cfg.serverUrl = arg;
-            cfg.httpMode = true;
         } else if ((arg == "--protocol" || arg == "-protocol") && i + 1 < argc) {
             cfg.protocolVersion = argv[++i];
         } else if (arg == "--stateless" || arg == "-stateless") {

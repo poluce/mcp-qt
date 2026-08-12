@@ -139,8 +139,6 @@ private:
     bool isToolCallAllowed(const QString& name) const;
     /// 工具对指定主体可见（visibility 缺省 = model+app 均可）。
     static bool hasVisibility(const QJsonObject& meta, const QString& which);
-    /// 从客户端缓存查工具（返回其 meta）。
-    QJsonObject toolMetaByName(const QString& name) const;
 
     void sendResponse(qint64 id, const QJsonObject& result);
     void sendError(qint64 id, int code, const QString& message);

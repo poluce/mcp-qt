@@ -579,14 +579,12 @@ private:
     void setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> transport);
 
     bool doInitializeAndWait(const QString& clientName, const QString& clientVersion, int timeoutMs, QString* errorString = nullptr);
-    bool doOAuth(const OAuthConfig& oauth);
 
 
 
 
     std::shared_ptr<mcp::McpClientSession> m_session;
     std::shared_ptr<mcp::McpOAuthClient> m_oauth;
-    bool m_initialized{false};
     mutable std::map<QString, McpQtTool> m_toolCache;
 
     TrafficLogger m_trafficLogger;
@@ -629,12 +627,6 @@ private:
     };
     QList<NotificationHandlerEntry> m_savedNotificationHandlers;
     
-    struct CapabilityHandlerEntry {
-        QPointer<QObject> context;
-        void* handler; // Type-erased, casted when used, or we can use specific fields
-        bool hasContext;
-    };
-    
     SamplingHandler m_savedSamplingHandler{nullptr};
     QPointer<QObject> m_savedSamplingContext;
     bool m_hasSavedSamplingContext{false};
@@ -649,9 +641,6 @@ private:
 
     std::function<std::shared_ptr<mcp::IMcpTransport>()> m_transportFactory;
     QList<QPointer<McpToolsModel>> m_toolsModels;
-    QList<QPointer<McpPromptsModel>> m_promptsModels;
-    QList<QPointer<McpResourcesModel>> m_resourcesModels;
-    QList<QPointer<McpResourceTemplatesModel>> m_templatesModels;
 
     struct ReplayableRequest {
         QString method;

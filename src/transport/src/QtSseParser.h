@@ -21,7 +21,6 @@ public:
     void setRetryCallback(RetryCallback callback);
     void setIdCallback(IdCallback callback);
     void pushChunk(const std::string& chunk);
-    void reset();
 
 private:
     void flushEventBlock(const std::string& block);

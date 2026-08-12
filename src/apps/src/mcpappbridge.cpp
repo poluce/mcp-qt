@@ -4,7 +4,6 @@
 #include "mcp_qt_client/McpQtClient.h"
 
 #include <QJsonArray>
-#include <QJsonDocument>
 #include <QDebug>
 
 namespace mcp_qt {
@@ -436,24 +435,17 @@ bool McpAppBridge::hasVisibility(const QJsonObject& meta, const QString& which) 
     return false;
 }
 
-QJsonObject McpAppBridge::toolMetaByName(const QString& name) const {
-    if (!m_client) return {};
-    for (const auto& t : m_client->cachedTools()) {
-        if (t.name == name) return t.meta;
-    }
-    return {};
-}
-
 bool McpAppBridge::isToolCallAllowed(const QString& name) const {
-    // 1. 客户端缓存中必须有该工具
+    // 单次扫描客户端缓存：同时判定存在性与 visibility meta（避免 cachedTools() 重建两次）
     if (!m_client) return false;
     bool exists = false;
+    QJsonObject meta;
     for (const auto& t : m_client->cachedTools()) {
-        if (t.name == name) { exists = true; break; }
+        if (t.name == name) { exists = true; meta = t.meta; break; }
     }
     if (!exists) return false;
 
-    // 2. allowedTools 白名单（空 = 全部放行）
+    // allowedTools 白名单（空 = 全部放行）
     if (!m_allowedTools.empty()) {
         bool found = false;
         for (const auto& allowed : m_allowedTools) {
@@ -462,11 +454,8 @@ bool McpAppBridge::isToolCallAllowed(const QString& name) const {
         if (!found) return false;
     }
 
-    // 3. visibility 必须含 "app"
-    const QJsonObject meta = toolMetaByName(name);
-    if (!hasVisibility(meta, QStringLiteral("app"))) return false;
-
-    return true;
+    // visibility 必须含 "app"
+    return hasVisibility(meta, QStringLiteral("app"));
 }
 
 // ========== 响应发送 ==========

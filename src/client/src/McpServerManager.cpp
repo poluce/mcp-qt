@@ -24,10 +24,13 @@ bool McpServerManager::loadServers(std::shared_ptr<IMcpConfigLoader> loader) {
 }
 
 QString McpServerManager::interpolateEnv(const QString& value) {
+    return interpolateEnv(value, QProcessEnvironment::systemEnvironment());
+}
+
+QString McpServerManager::interpolateEnv(const QString& value, const QProcessEnvironment& env) {
     QString result = value;
     static QRegularExpression re(QStringLiteral("\\$\\{([A-Za-z0-9_]+)\\}"));
-    auto env = QProcessEnvironment::systemEnvironment();
-    
+
     QRegularExpressionMatchIterator i = re.globalMatch(value);
     int offset = 0;
     while (i.hasNext()) {
@@ -75,12 +78,13 @@ bool McpServerManager::startServer(const McpServerConfig& rawCfg) {
     stopServer(rawCfg.serverName);
 
     McpServerConfig cfg = rawCfg;
-    cfg.command = interpolateEnv(cfg.command);
-    for (int i = 0; i < cfg.args.size(); ++i) cfg.args[i] = interpolateEnv(cfg.args[i]);
-    cfg.url = interpolateEnv(cfg.url);
-    cfg.nameSpace = interpolateEnv(cfg.nameSpace);
-    for (auto it = cfg.env.begin(); it != cfg.env.end(); ++it) *it = interpolateEnv(*it);
-    for (auto it = cfg.headers.begin(); it != cfg.headers.end(); ++it) *it = interpolateEnv(*it);
+    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    cfg.command = interpolateEnv(cfg.command, env);
+    for (int i = 0; i < cfg.args.size(); ++i) cfg.args[i] = interpolateEnv(cfg.args[i], env);
+    cfg.url = interpolateEnv(cfg.url, env);
+    cfg.nameSpace = interpolateEnv(cfg.nameSpace, env);
+    for (auto it = cfg.env.begin(); it != cfg.env.end(); ++it) *it = interpolateEnv(*it, env);
+    for (auto it = cfg.headers.begin(); it != cfg.headers.end(); ++it) *it = interpolateEnv(*it, env);
 
     if (!cfg.url.isEmpty()) {
         processHttpServerConfig(cfg);

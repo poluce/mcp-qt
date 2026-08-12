@@ -238,8 +238,6 @@ private:
     mutable std::mutex m_mutex;
     OAuthToken m_currentToken;
     std::map<std::string, OAuthToken> m_tokensByIssuer;  // SEP-2352: issuer -> token
-    OAuthClientRegistration m_registration;
-    OAuthServerMetadata m_metadata;
     std::vector<std::string> m_requestedScopes;  // SEP-2350: 已请求的 scope 集合
 
     // 认证/刷新流程互斥状态（独立于 m_mutex，避免与 token 读写互相阻塞）

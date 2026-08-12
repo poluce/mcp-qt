@@ -10,6 +10,8 @@
 #include <mcp_qt_client/McpQtClient.h>
 #include <mcp_qt_client/IMcpConfigLoader.h>
 
+class QProcessEnvironment;
+
 namespace mcp_qt {
 
 enum class McpServerState {
@@ -80,6 +82,7 @@ signals:
 
 private:
     static QString interpolateEnv(const QString& value);
+    static QString interpolateEnv(const QString& value, const QProcessEnvironment& env);
     static void configureBuilder(McpQtClientBuilder& builder, const McpServerConfig& cfg);
     void processHttpServerConfig(const McpServerConfig& cfg);
     void setupClientSignals(const QString& serverName, const std::shared_ptr<McpQtClient>& client);

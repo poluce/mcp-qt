@@ -1,8 +1,6 @@
 add_executable(mcp_client_conformance_qt
     RunnerConfig.cpp
     ScenarioRegistry.cpp
-    ScenarioHandlersList.cpp
-    ScenarioContext.cpp
     ScenarioHandlersAuthQt.cpp
     ScenarioHandlersStateless.cpp
     ScenarioHandlersStatelessHttp.cpp
