@@ -37,10 +37,17 @@ QtHttpSseWorker::QtHttpSseWorker(QString baseUrl, QObject* parent)
     m_healthCheckTimer->setInterval(50);
     connect(m_healthCheckTimer, &QTimer::timeout, this, [this]() {
         if (!m_sseConnected || m_stopping) return;
-        if (m_lastDataTime.isValid() && m_lastDataTime.elapsed() > 5000) {
-            // 连接停滞检测：若超过 5 秒未恢复数据，则主动断开触发重连
+        // 服务器发过 retry: 字段（期望快速重连）→ 用快阈值探测停滞；否则保守 5000ms。
+        // 冷却期（5s）限制重连风暴，故快阈值只加快首次探测，不放大稳态重连频率。
+        const qint64 stallMs = m_retryFieldReceived ? 100 : 5000;
+        if (m_lastDataTime.isValid() && m_lastDataTime.elapsed() > stallMs) {
+            // 连接停滞检测：超过阈值未恢复数据，则主动断开触发重连。
+            // 先直接启动重连定时器（按 retry 字段延迟），再 abort 清理死连接——
+            // 避免等 abort→finished 信号往返额外吃掉时间（SSE retry 时序敏感，SEP-1699）。
+            // 冷却期（5s）限制重连风暴，快阈值只加快首次探测。
             if (!m_lastHealthCheckTime.isValid() || m_lastHealthCheckTime.elapsed() > 5000) {
                 m_lastHealthCheckTime.start();
+                scheduleReconnect();
                 if (m_sseReply) {
                     m_sseReply->abort();
                 }
@@ -50,6 +57,8 @@ QtHttpSseWorker::QtHttpSseWorker(QString baseUrl, QObject* parent)
 
     m_parser.setRetryCallback([this](int retryMs) {
         m_retryMs = retryMs;
+        // 服务器显式发 retry: 字段（SEP-1699）→ 期望快速重连，健康检查改用快阈值
+        m_retryFieldReceived = true;
     });
 
     // IMPORTANT: Capture Last-Event-ID for reconnection!
@@ -311,6 +320,7 @@ void QtHttpSseWorker::parseSseInlineBody(const QByteArray& body) {
     QtSseParser postParser;
     postParser.setRetryCallback([this](int retryMs) {
         m_retryMs = retryMs;
+        m_retryFieldReceived = true;
     });
     postParser.setIdCallback([this](const std::string& id) {
         m_lastEventId = QString::fromStdString(id);

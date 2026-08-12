@@ -11,13 +11,20 @@ namespace mcp_conformance {
 // ========== 基本场景（McpQtClient / Qt 原生 QNAM）==========
 
 int runInitialize(const RunnerConfig& c) {
+    auto cl = mcp_qt::McpQtClient::createForTest();
+    if (!c.protocolVersion.empty()) {
+        cl->setProtocolVersion(QString::fromStdString(c.protocolVersion));
+    }
+    auto t = std::make_shared<mcp_qt::QtHttpSseTransport>(c.serverUrl);
+    if (!c.protocolVersion.empty()) {
+        t->setProtocolVersion(c.protocolVersion);
+    }
     QString err;
-    auto cl = mcp_qt::McpQtClient::connectHttpAndWait(QString::fromStdString(c.serverUrl), "mcp-conformance-client-cpp", "1.0.0", 10000, &err);
-    if (!cl) {
-        std::cerr << "[runInitialize] connectHttpAndWait failed: " << err.toStdString() << std::endl;
+    if (!cl->connectToTransportAndWait(t, "mcp-conformance-client-cpp", "1.0.0", 10000, &err)) {
+        std::cerr << "[runInitialize] connect failed: " << err.toStdString() << std::endl;
         return 1;
     }
-    
+
     QEventLoop loop;
     bool hasError = false;
     QString listToolsErr;
@@ -28,7 +35,7 @@ int runInitialize(const RunnerConfig& c) {
     });
     QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     loop.exec();
-    
+
     if (hasError) {
         std::cerr << "[runInitialize] listToolsAsync failed: " << listToolsErr.toStdString() << std::endl;
         return 1;
@@ -57,6 +64,9 @@ int runToolsCall(const RunnerConfig& c) {
 
 int runSseRetry(const RunnerConfig& c) {
     auto cl = mcp_qt::McpQtClient::createForTest();
+    if (!c.protocolVersion.empty()) {
+        cl->setProtocolVersion(QString::fromStdString(c.protocolVersion));
+    }
     auto t = std::make_shared<mcp_qt::QtHttpSseTransport>(c.serverUrl);
     if (!c.protocolVersion.empty()) {
         t->setProtocolVersion(c.protocolVersion);
@@ -92,6 +102,9 @@ int runSseRetry(const RunnerConfig& c) {
 int runElicitationDefaults(const RunnerConfig& c) {
     // 使用 createForTest + connectToTransportAndWait，确保在 initialize 前注册 handler 和 capability
     auto cl = mcp_qt::McpQtClient::createForTest();
+    if (!c.protocolVersion.empty()) {
+        cl->setProtocolVersion(QString::fromStdString(c.protocolVersion));
+    }
 
     // 预注册 elicitation capability（在 connectToTransportAndWait 中会在 initialize 前生效）
     QJsonObject ec; ec["form"] = QJsonObject{{"applyDefaults", true}};

@@ -54,6 +54,7 @@ private:
     QString m_sessionId;
     QString m_lastEventId;
     int m_retryMs{2000};
+    bool m_retryFieldReceived{false};  // 服务器发过 retry: 字段 → 健康检查用快阈值（SEP-1699）
     int m_authRetryCount{0};
     static constexpr int kMaxAuthRetries = 3;
     QElapsedTimer m_lastDataTime;
