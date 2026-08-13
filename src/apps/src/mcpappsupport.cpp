@@ -130,13 +130,16 @@ QString McpAppSupport::buildDefaultCsp() {
     // default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';
     // img-src 'self' data:; media-src 'self' data:; connect-src 'none';
     // 未列出的指令（frame-src/object-src/base-uri 等）经 default-src 'none' fallback 全部禁用。
+    // 一些三维/可视化 App 会用 blob: Web Worker 做后台计算；不放行时任务队列会卡死。
     return QStringLiteral(
         "default-src 'none'; "
-        "script-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "media-src 'self' data:; "
-        "connect-src 'none';");
+        "connect-src 'none'; "
+        "font-src 'self'; "
+        "worker-src 'self' blob:;");
 }
 
 namespace {
@@ -165,14 +168,17 @@ QString McpAppSupport::buildCsp(const QJsonObject& uiMeta) {
     const QStringList baseUriDomains = cspDomainList(csp, "baseUriDomains");
 
     // 规范 CSP Construction from Metadata：未声明域绝不放行（frame/base 缺省最严格）。
+    // 每类资源只允许 App 元数据明确声明的域；兼容适配器若引入可信镜像，
+    // 必须通过有效 uiMeta 追加域，而不是让渲染器全局放开 https:。
     QString c;
     c += QStringLiteral("default-src 'none'; ");
-    c += QStringLiteral("script-src 'self' 'unsafe-inline' ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
+    c += QStringLiteral("script-src 'self' 'unsafe-inline' 'unsafe-eval' ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
     c += QStringLiteral("style-src 'self' 'unsafe-inline' ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
     c += QStringLiteral("connect-src 'self' ") + cspSpaced(connectDomains) + QStringLiteral("; ");
     c += QStringLiteral("img-src 'self' data: ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
     c += QStringLiteral("font-src 'self' ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
     c += QStringLiteral("media-src 'self' data: ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
+    c += QStringLiteral("worker-src 'self' blob: ") + cspSpaced(resourceDomains) + QStringLiteral("; ");
     c += QStringLiteral("frame-src ") + (frameDomains.isEmpty() ? QStringLiteral("'none'") : frameDomains.join(QLatin1Char(' '))) + QStringLiteral("; ");
     c += QStringLiteral("object-src 'none'; ");
     c += QStringLiteral("base-uri ") + (baseUriDomains.isEmpty() ? QStringLiteral("'self'") : baseUriDomains.join(QLatin1Char(' '))) + QStringLiteral(";");

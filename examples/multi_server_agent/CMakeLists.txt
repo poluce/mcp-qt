@@ -4,8 +4,12 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_library(multi_server_agent_core STATIC
     AgentSession.cpp
+    AgentRegistry.cpp
+    AgentReconciler.cpp
     LlmAgentExecutor.cpp
     LlmBackends.cpp
+    LlmCredentialResolver.cpp
+    LlmCredentialResolver.h
     AgentMainWindow.cpp
     AgentMainWindow.h
 )

@@ -12,6 +12,59 @@
 
 namespace mcp_agent {
 
+ScriptedToolLlmBackend::ScriptedToolLlmBackend(QString toolName, QJsonObject arguments)
+    : m_toolName(std::move(toolName)), m_arguments(std::move(arguments)) {}
+
+void ScriptedToolLlmBackend::requestDecision(
+    const QList<LlmMessage>& history,
+    const QJsonArray& availableTools,
+    std::function<void(bool, LlmDecision, QString)> callback)
+{
+    QTimer::singleShot(0, [history, availableTools, callback = std::move(callback),
+                           toolName = m_toolName, arguments = m_arguments]() mutable {
+        auto availableToolName = [](const QJsonValue& value) {
+            const QJsonObject object = value.toObject();
+            const QString direct = object.value(QStringLiteral("name")).toString();
+            return direct.isEmpty()
+                ? object.value(QStringLiteral("function")).toObject()
+                      .value(QStringLiteral("name")).toString()
+                : direct;
+        };
+        bool toolExists = false;
+        for (const QJsonValue& value : availableTools) {
+            if (availableToolName(value) == toolName) {
+                toolExists = true;
+                break;
+            }
+        }
+        if (!toolExists) {
+            QStringList names;
+            for (const QJsonValue& value : availableTools) {
+                names.append(availableToolName(value));
+            }
+            callback(false, {}, QStringLiteral("Scripted MCP App smoke tool not found: %1; available: %2")
+                                    .arg(toolName, names.join(QStringLiteral(", "))));
+            return;
+        }
+
+        bool hasToolResult = false;
+        for (const LlmMessage& message : history) {
+            if (message.role == QStringLiteral("tool")) { hasToolResult = true; break; }
+        }
+        LlmDecision decision;
+        if (!hasToolResult) {
+            decision.thought = QStringLiteral("MCP App smoke test: call %1").arg(toolName);
+            decision.isToolCall = true;
+            decision.toolName = toolName;
+            decision.toolArguments = arguments;
+        } else {
+            decision.thought = QStringLiteral("MCP App smoke tool returned successfully.");
+            decision.finalAnswer = QStringLiteral("MCP App smoke test completed: %1").arg(toolName);
+        }
+        callback(true, decision, {});
+    });
+}
+
 // ==========================================
 // MockLlmBackend
 // ==========================================

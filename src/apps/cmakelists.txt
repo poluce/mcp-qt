@@ -3,15 +3,22 @@
 # 渲染：WebView2（Windows 默认后端，动态加载 WebView2Loader.dll）
 
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 add_library(mcp_qt_apps STATIC
     include/mcp_qt_apps/McpAppSupport.h
     include/mcp_qt_apps/IMcpAppRenderer.h
     include/mcp_qt_apps/McpAppBridge.h
+    include/mcp_qt_apps/McpAppContentAdapter.h
+    include/mcp_qt_apps/McpAppCompatibility.h
     include/mcp_qt_apps/McpAppWebView2Renderer.h
     src/McpAppSupport.cpp
     src/McpAppBridge.cpp
+    src/McpAppContentAdapter.cpp
+    src/adapters/CesiumDownloadsAdapter.cpp
+    src/adapters/StandardCompatibilityAdapters.cpp
     src/McpAppWebView2Renderer.cpp
+    mcp_app_assets.qrc
 )
 
 target_include_directories(mcp_qt_apps PUBLIC

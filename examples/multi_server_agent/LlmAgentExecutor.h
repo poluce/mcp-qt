@@ -22,6 +22,15 @@ public:
     );
 
     /**
+     * @brief 设置 MCP Apps 引用式资源获取器。
+     *
+     * 部分 MCP Apps 服务器（如 ext-apps 示例）工具结果只返回 _meta.viewUUID 引用，
+     * HTML 在工具的 _meta.ui.resourceUri（ui:// 资源）。宿主需据此 resources/read 取回并渲染。
+     */
+    using AppResourceFetcher = std::function<void(const QString& toolName, std::function<void(const QString& html, const QJsonObject& uiMeta, const QString& error)> cb)>;
+    void setAppResourceFetcher(AppResourceFetcher fetcher);
+
+    /**
      * @brief 设置诊断上下文信息（仅在发生错误时组装详细排查日志使用）
      */
     void setDiagnosticContext(const QString& apiUrl, const QString& apiKey, const QString& modelName);
@@ -48,7 +57,11 @@ public:
 signals:
     void stepProgress(const QString& type, const QString& content);
     /// 工具返回 MCP Apps UI 内容（text/html;profile=mcp-app），供宿主内嵌 WebView2 渲染。
-    void mcpAppContentAvailable(const QString& html, const QString& toolName);
+    /// uiMeta = 资源的 _meta.ui（含 csp/permissions），宿主据此构建沙箱 CSP。
+    /// toolInput/toolResult 必须在 App initialized 后转发，驱动 View 展示本次工具调用的实际状态。
+    void mcpAppContentAvailable(const QString& html, const QString& toolName,
+                                const QJsonObject& uiMeta, const QJsonObject& toolInput,
+                                const QJsonObject& toolResult);
 
 private:
     void nextStep(
@@ -59,6 +72,7 @@ private:
     std::shared_ptr<ILlmBackend> m_backend;
     QList<LlmMessage> m_history;
     std::function<void(const QString& name, const QJsonObject& args, std::function<void(mcp_qt::McpResult)>)> m_toolDispatcher;
+    AppResourceFetcher m_appResourceFetcher;
 
     int m_maxSteps{200};
     int m_currentStep{0};

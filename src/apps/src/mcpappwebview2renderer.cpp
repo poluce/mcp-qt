@@ -2,105 +2,38 @@
 #include "mcp_qt_apps/McpAppWebView2Renderer.h"
 #include "mcp_qt_apps/McpAppSupport.h"
 
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
+#include <QRegularExpression>
 #include <QShowEvent>
 #include <QResizeEvent>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QTimer>
 
 #include <windows.h>
+#include <objbase.h>  // CreateStreamOnHGlobal（CapturePreview 内存输出流）
 #include <psapi.h>
 #include <tlhelp32.h>
 #include "WebView2.h"
 
+static void ensureMcpAppResources()
+{
+    Q_INIT_RESOURCE(mcp_app_assets);
+}
+
 namespace mcp_qt {
 
-// ================== 沙箱代理壳页（规范 2026-01-26 double-iframe sandbox）==================
-// Host 层 = 本 WebView2 文档；Sandbox 代理 = 壳页；View = 内层 sandbox iframe。
-// 壳页职责：
-//   1. 加载就绪后向 Host 发 ui/notifications/sandbox-proxy-ready
-//   2. 收到 ui/notifications/sandbox-resource-ready 后，按 csp/permissions 创建
-//      内层 iframe（sandbox="allow-scripts allow-same-origin"），srcdoc 注入 CSP meta
-//      + AppBridge 桥脚本后加载 App HTML
-//   3. 双向转发非 sandbox-* 的 postMessage（Host <-> View）
-// 采用字面量模板 + 少量插值（CSP / permissions / sandbox 均作为参数经
-// sandbox-resource-ready 传入，不在模板里硬编码）。
-const char* kSandboxShellHtml = R"(<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="margin:0;padding:0;background:#fff">
-<div id="app"></div>
-<script>
-(function(){
-  function post(m){ try{ window.chrome.webview.postMessage(m); }catch(e){} }
-  var iframe = null;
-  var pendingToApp = [];
-  post({jsonrpc:'2.0', method:'ui/notifications/sandbox-proxy-ready', params:{}});
-
-  function buildAllow(p){
-    var a=[];
-    if (p && p.camera) a.push('camera');
-    if (p && p.microphone) a.push('microphone');
-    if (p && p.geolocation) a.push('geolocation');
-    if (p && p.clipboardWrite) a.push('clipboard-write');
-    return a.join(' ');
-  }
-  function bridgeScript(){
-    return "if(!window.mcpAppHost){window.mcpAppHost={_l:[],postMessage:function(m){try{parent.postMessage(m,'*')}catch(e){}},addEventListener:function(f){this._l.push(f)},_dispatch:function(m){this._l.forEach(function(fn){try{fn(m)}catch(e){}})}};window.addEventListener('message',function(e){window.mcpAppHost._dispatch(e.data)})}";
-  }
-  function wrapWithCsp(html, csp){
-    var meta = '<meta http-equiv="Content-Security-Policy" content="' + String(csp).replace(/"/g,'&quot;') + '">';
-    var m = /<head[^>]*>/i.exec(html);
-    if (m){
-      var idx = html.indexOf(m[0]) + m[0].length;
-      return html.slice(0, idx) + meta + html.slice(idx);
-    }
-    return '<!DOCTYPE html><html><head><meta charset="utf-8">' + meta + '</head><body>' + html + '</body></html>';
-  }
-  function loadResource(p){
-    try {
-      var html = wrapWithCsp(p.html || '', p.csp || '');
-      // 注入 bridgeScript 到 srcdoc head 末尾，用 \x3C 表示 "<"：
-      // Chromium 的 HTML 解析器在 script 块内遇字面量 "<script"/"</script" 会进入
-      // double-escaped 状态使整个壳页脚本失效，故不能用裸字符串拼接。
-      html = html.replace(/<\/head>/i, '\x3Cscript>' + bridgeScript() + '\x3C/script></head>');
-      var sandbox = p.sandbox || 'allow-scripts allow-same-origin';
-      var allow = buildAllow(p.permissions);
-      iframe = document.createElement('iframe');
-      iframe.setAttribute('sandbox', sandbox);
-      if (allow) iframe.setAttribute('allow', allow);
-      var border = (p.prefersBorder === false) ? 'none' : '1px solid #aab';  // 边框 = 沙箱 UI 边界标识
-      iframe.style.cssText = 'width:100%;height:100%;border:' + border + ';display:block;';
-      iframe.srcdoc = html;
-      document.getElementById('app').appendChild(iframe);
-      for (var i=0;i<pendingToApp.length;i++){ try{ iframe.contentWindow.postMessage(pendingToApp[i], '*'); }catch(e){} }
-      pendingToApp = [];
-    } catch(e) {
-      post({jsonrpc:'2.0', method:'debug/sandbox-error', params:{err:String(e)}});
-    }
-  }
-  window.chrome.webview.addEventListener('message', function(e){
-    var m = e.data;
-    if (!m || typeof m !== 'object') return;
-    if (m.method === 'ui/notifications/sandbox-resource-ready'){ loadResource(m.params||{}); return; }
-    if (String(m.method).indexOf('ui/notifications/sandbox-') === 0) return;
-    if (iframe){ try{ iframe.contentWindow.postMessage(m, '*'); }catch(err){} }
-    else { pendingToApp.push(m); }
-  });
-  window.addEventListener('message', function(e){
-    var d = e.data;
-    if (!d || typeof d !== 'object' || !d.method) return;
-    if (String(d.method).indexOf('ui/notifications/sandbox-') === 0) return;
-    post(d);
-  });
-})();
-</script>
-</body>
-</html>)";
+namespace {
+QByteArray readEmbeddedAsset(const QString& path)
+{
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray{};
+}
+} // namespace
 
 // ================== COM 回调接口实现（MinGW 下显式实现 vtable）==================
 namespace wv2_detail {
@@ -184,6 +117,17 @@ private:
     std::function<HRESULT(ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs*)> m_fn;
 };
 
+class CapturePreviewHandler : public ICoreWebView2CapturePreviewCompletedHandler {
+public:
+    explicit CapturePreviewHandler(std::function<void(HRESULT)> fn) : m_fn(std::move(fn)) {}
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override { return handleQueryInterface(riid, ppv, this); }
+    STDMETHODIMP_(ULONG) AddRef() override { return 1; }
+    STDMETHODIMP_(ULONG) Release() override { return 1; }
+    STDMETHODIMP Invoke(HRESULT result) override { m_fn(result); return S_OK; }
+private:
+    std::function<void(HRESULT)> m_fn;
+};
+
 // 动态加载 WebView2Loader.dll（避免链接 MSVC 静态库）
 using CreateEnvFn = HRESULT(STDMETHODCALLTYPE*)(PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions*, ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
 CreateEnvFn g_createEnv = nullptr;
@@ -203,8 +147,10 @@ bool loadWebView2LoaderOnce() {
 using namespace wv2_detail;
 
 McpAppWebView2Renderer::McpAppWebView2Renderer(QWidget* parent)
-    : QWidget(parent)
+    : QWidget(parent),
+      m_contentAdapters(std::make_shared<McpAppContentAdapterRegistry>())
 {
+    ensureMcpAppResources();
     setAttribute(Qt::WA_NativeWindow, true);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
@@ -257,16 +203,52 @@ void McpAppWebView2Renderer::ensureInitialized()
             self->m_webview = wv; // get_CoreWebView2 返回已 AddRef，析构 Release 平衡
             self->m_ready = true;
 
+            // NavigateToString 生成的文档没有正常来源，内层 srcdoc 最终会成为
+            // origin=null。依赖 blob Worker 的 App 会因此启动失败。把壳页映射到
+            // WebView2 的虚拟 HTTPS 域名；内层
+            // iframe 仍保留 sandbox，仅通过 allow-same-origin 继承这个隔离来源。
+            self->m_virtualHostRoot = std::make_unique<QTemporaryDir>(
+                QDir::tempPath() + QStringLiteral("/mcp_qt_webview2_XXXXXX"));
+            const QString shellDir = self->m_virtualHostRoot->path() + QStringLiteral("/shell");
+            self->m_virtualAppDir = self->m_virtualHostRoot->path() + QStringLiteral("/app");
+            if (self->m_virtualHostRoot->isValid()
+                && QDir().mkpath(shellDir) && QDir().mkpath(self->m_virtualAppDir)) {
+                const QByteArray shellBytes = readEmbeddedAsset(QStringLiteral(":/mcp_qt_apps/sandbox.html"));
+                const QByteArray bridgeBytes = readEmbeddedAsset(QStringLiteral(":/mcp_qt_apps/bridge.js"));
+                QFile shellFile(shellDir + QStringLiteral("/sandbox.html"));
+                if (shellFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    const bool shellWritten = !shellBytes.isEmpty()
+                                           && shellFile.write(shellBytes) == shellBytes.size();
+                    shellFile.close();
+                    ICoreWebView2_3* wv3 = nullptr;
+                    if (shellWritten && SUCCEEDED(wv->QueryInterface(
+                            IID_ICoreWebView2_3, reinterpret_cast<void**>(&wv3)))) {
+                        const HRESULT hrShellMap = wv3->SetVirtualHostNameToFolderMapping(
+                            L"mcp-shell.local", shellDir.toStdWString().c_str(),
+                            COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+                        const HRESULT hrAppMap = wv3->SetVirtualHostNameToFolderMapping(
+                            L"mcp-app.local", self->m_virtualAppDir.toStdWString().c_str(),
+                            COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+                        self->m_sandboxVirtualHostReady = SUCCEEDED(hrShellMap) && SUCCEEDED(hrAppMap);
+                        qDebug() << "[McpAppWebView2] virtual sandbox origin mapping hr=0x"
+                                 << QString::number(hrShellMap, 16)
+                                 << "app hr=0x" << QString::number(hrAppMap, 16);
+                        wv3->Release();
+                    }
+                }
+                QFile bridgeFile(self->m_virtualAppDir + QStringLiteral("/bridge.js"));
+                if (bridgeFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    bridgeFile.write(bridgeBytes);
+                    bridgeFile.close();
+                }
+            }
+
             // WebView2 需要可见 + 有效尺寸才启动渲染
             controller->put_IsVisible(TRUE);
-            {
-                RECT b; b.left = 0; b.top = 0;
-                b.right = self->width(); b.bottom = self->height();
-                if (b.right < 100) b.right = 100;
-                if (b.bottom < 100) b.bottom = 100;
-                controller->put_Bounds(b);
-            }
-            qDebug() << "[McpAppWebView2] controller visible & bounds set, size=" << self->width() << "x" << self->height();
+            self->updateViewportBounds();
+            qDebug() << "[McpAppWebView2] controller visible & bounds set, logical size="
+                     << self->width() << "x" << self->height()
+                     << "devicePixelRatio=" << self->devicePixelRatioF();
 
             // 宿主 -> App 通道（App 用 chrome.webview message 事件接收）
             // App -> 宿主 通道
@@ -367,8 +349,16 @@ void McpAppWebView2Renderer::loadSandboxShell()
     QTimer::singleShot(15000, this, [this]() {
         if (!m_navCompleted) emit loadTimeout();
     });
-    static_cast<ICoreWebView2*>(m_webview)->NavigateToString(
-        QString::fromUtf8(kSandboxShellHtml).toStdWString().c_str());
+    if (m_sandboxVirtualHostReady) {
+        // 壳页与 App 使用不同来源，避免 allow-scripts + allow-same-origin 的内层
+        // iframe 访问并解除父页 sandbox。
+        static_cast<ICoreWebView2*>(m_webview)->Navigate(L"https://mcp-shell.local/sandbox.html");
+    } else {
+        qWarning() << "[McpAppWebView2] virtual sandbox origin unavailable; using opaque fallback";
+        const QString shellHtml = QString::fromUtf8(
+            readEmbeddedAsset(QStringLiteral(":/mcp_qt_apps/sandbox.html")));
+        static_cast<ICoreWebView2*>(m_webview)->NavigateToString(shellHtml.toStdWString().c_str());
+    }
 }
 
 void McpAppWebView2Renderer::sendSandboxResourceReady()
@@ -390,16 +380,60 @@ void McpAppWebView2Renderer::sendSandboxResourceReady()
         return;
     }
     qDebug() << "[McpAppWebView2] sendSandboxResourceReady, htmlLen=" << m_pendingHtml.size();
-    QString html = m_pendingHtml;
-    if (!m_pendingBaseUrl.isEmpty()) {
-        // 保留相对资源解析语义：壳页 wrapWithCsp 会把 <base> 归入 <head>
-        html = QStringLiteral("<base href=\"%1\">%2").arg(m_pendingBaseUrl.toString(), html);
+    McpAppContent content{m_pendingHtml, m_uiMeta, m_pendingBaseUrl, {}};
+    if (m_contentAdapters) content = m_contentAdapters->adapt(std::move(content));
+    QString html = content.html;
+    const QJsonObject effectiveUiMeta = content.uiMeta;
+    if (!content.appliedAdapters.isEmpty()) {
+        qInfo() << "[McpAppWebView2] applied content adapters:" << content.appliedAdapters;
     }
     QJsonObject params;
-    params[QStringLiteral("html")] = html;
     params[QStringLiteral("sandbox")] = QStringLiteral("allow-scripts allow-same-origin");
-    const QString csp = McpAppSupport::buildCsp(m_uiMeta);
+    const QString csp = McpAppSupport::buildCsp(effectiveUiMeta);
+    qInfo().noquote() << "[McpAppWebView2] CSP:" << csp;
     params[QStringLiteral("csp")] = csp;
+
+    if (m_sandboxVirtualHostReady) {
+        // srcdoc 的 location 永远是 about:srcdoc，一些运行时会错误解析相对 Worker
+        // 模块。将完整 App 文档写入虚拟域，让 location/origin/Worker 基址一致。
+        QString headInjection = QStringLiteral(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"%1\">")
+            .arg(csp.toHtmlEscaped().replace(QLatin1Char('"'), QStringLiteral("&quot;")));
+        if (!content.baseUrl.isEmpty()) {
+            headInjection += QStringLiteral("<base href=\"%1\">")
+                .arg(content.baseUrl.toString().toHtmlEscaped());
+        }
+        headInjection += QStringLiteral("<script src=\"/bridge.js\"></script>");
+        const QRegularExpression headTag(QStringLiteral("<head[^>]*>"),
+                                         QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch headMatch = headTag.match(html);
+        if (headMatch.hasMatch()) {
+            html.insert(headMatch.capturedEnd(), headInjection);
+        } else {
+            html.prepend(QStringLiteral("<!DOCTYPE html><html><head>%1</head><body>").arg(headInjection));
+            html.append(QStringLiteral("</body></html>"));
+        }
+        const QString viewName = QStringLiteral("view-%1.html")
+            .arg(QString::number(reinterpret_cast<quintptr>(this), 16));
+        const QString viewPath = m_virtualAppDir + QLatin1Char('/') + viewName;
+        QFile viewFile(viewPath);
+        if (viewFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
+            && viewFile.write(html.toUtf8()) >= 0) {
+            viewFile.close();
+            params[QStringLiteral("url")] = QStringLiteral("https://mcp-app.local/") + viewName;
+            params[QStringLiteral("html")] = QString();
+        } else {
+            viewFile.close();
+            params[QStringLiteral("html")] = html;
+        }
+    } else {
+        if (!content.baseUrl.isEmpty()) {
+            html = QStringLiteral("<base href=\"%1\">%2").arg(content.baseUrl.toString(), html);
+        }
+        params[QStringLiteral("bridgeScript")] = QString::fromUtf8(
+            readEmbeddedAsset(QStringLiteral(":/mcp_qt_apps/bridge.js")));
+        params[QStringLiteral("html")] = html;
+    }
     emit cspAudited(csp);  // 安全审计日志（规范 SHOULD）
     params[QStringLiteral("prefersBorder")] = McpAppSupport::uiPrefersBorder(m_uiMeta);
     const QJsonValue perms = m_uiMeta.value(QStringLiteral("permissions"));
@@ -411,6 +445,12 @@ void McpAppWebView2Renderer::sendSandboxResourceReady()
         {QStringLiteral("method"), QStringLiteral("ui/notifications/sandbox-resource-ready")},
         {QStringLiteral("params"), params}
     }).toJson(QJsonDocument::Compact)));
+}
+
+void McpAppWebView2Renderer::setContentAdapterRegistry(
+    std::shared_ptr<McpAppContentAdapterRegistry> registry)
+{
+    m_contentAdapters = std::move(registry);
 }
 
 void McpAppWebView2Renderer::setUiMeta(const QJsonObject& uiMeta)
@@ -499,6 +539,9 @@ void McpAppWebView2Renderer::handleWebMessage(const QString& json)
     if (!doc.isObject()) return;
     const QJsonObject obj = doc.object();
     const QString method = obj.value(QStringLiteral("method")).toString();
+    if (method.startsWith(QLatin1String("debug/"))) {
+        qDebug().noquote() << "[McpAppWebView2] " << method << QJsonDocument(obj.value(QStringLiteral("params")).toObject()).toJson(QJsonDocument::Compact);
+    }
     if (method == QStringLiteral("ui/notifications/sandbox-proxy-ready")) {
         sendSandboxResourceReady();
         return;
@@ -553,16 +596,86 @@ void McpAppWebView2Renderer::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
     ensureInitialized();
+    // 显示时按当前实际尺寸更新 WebView2 视口（控制器创建时可能还是未布局的小尺寸）
+    updateViewportBounds();
 }
 
 void McpAppWebView2Renderer::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    if (m_controller) {
-        RECT bounds;
-        bounds.left = 0; bounds.top = 0;
-        bounds.right = width(); bounds.bottom = height();
-        static_cast<ICoreWebView2Controller*>(m_controller)->put_Bounds(bounds);
+    updateViewportBounds();
+}
+
+void McpAppWebView2Renderer::capturePreviewToFile(const QString& path,
+                                                  std::function<void(bool, const QString&)> onDone)
+{
+    if (!m_webview || !m_ready) {
+        if (onDone) onDone(false, QStringLiteral("webview not ready"));
+        return;
+    }
+    // 用内存流承接 CapturePreview 的 PNG 输出：避免文件流在 Release 后仍锁着文件导致改名失败
+    IStream* stream = nullptr;
+    HRESULT hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+    if (FAILED(hr)) {
+        if (onDone) onDone(false, QStringLiteral("CreateStreamOnHGlobal failed"));
+        return;
+    }
+    auto* wv = static_cast<ICoreWebView2*>(m_webview);
+    auto* handler = new CapturePreviewHandler([path, stream, onDone](HRESULT result) {
+        if (SUCCEEDED(result)) {
+            HGLOBAL hg = nullptr;
+            if (SUCCEEDED(GetHGlobalFromStream(stream, &hg))) {
+                const SIZE_T size = GlobalSize(hg);
+                void* ptr = GlobalLock(hg);
+                if (ptr) {
+                    QFile f(path);
+                    if (f.open(QIODevice::WriteOnly)) {
+                        f.write(static_cast<const char*>(ptr), static_cast<qint64>(size));
+                        f.close();
+                        if (onDone) onDone(true, QString());
+                    } else {
+                        if (onDone) onDone(false, QStringLiteral("open output file failed"));
+                    }
+                    GlobalUnlock(hg);
+                } else {
+                    if (onDone) onDone(false, QStringLiteral("GlobalLock failed"));
+                }
+            } else {
+                if (onDone) onDone(false, QStringLiteral("GetHGlobalFromStream failed"));
+            }
+        } else {
+            if (onDone) onDone(false, QStringLiteral("CapturePreview failed"));
+        }
+        stream->Release();
+    });
+    hr = wv->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream, handler);
+    if (FAILED(hr)) {
+        stream->Release();
+        delete handler;
+        if (onDone) onDone(false, QStringLiteral("CapturePreview call failed"));
+    }
+}
+
+void McpAppWebView2Renderer::updateViewportBounds()
+{
+    if (!m_controller) return;
+
+    // Qt 的 width()/height() 是设备无关的逻辑像素，而 WebView2 Controller
+    // 默认以 raw pixels 解释 Bounds。高 DPI 下直接传 Qt 尺寸会让 WebView
+    // 宽高各缩小一个缩放因子（200% 缩放时最终只占窗口面积的 1/4）。
+    // 这里不能使用 GetClientRect(winId())：renderer 在隐藏弹窗中提前创建
+    // native HWND 时，该客户区可能仍保留初始的 100x30 逻辑尺寸。
+    const qreal scale = devicePixelRatioF();
+    RECT bounds{};
+    bounds.right = qRound(width() * scale);
+    bounds.bottom = qRound(height() * scale);
+
+    if (bounds.right <= 0 || bounds.bottom <= 0) return;
+    auto* controller = static_cast<ICoreWebView2Controller*>(m_controller);
+    const HRESULT hr = controller->put_Bounds(bounds);
+    if (FAILED(hr)) {
+        qWarning() << "[McpAppWebView2] put_Bounds failed: 0x"
+                   << QString::number(hr, 16);
     }
 }
 

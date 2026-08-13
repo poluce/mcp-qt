@@ -19,6 +19,10 @@ void LlmAgentExecutor::setToolDispatcher(
     m_toolDispatcher = dispatcher;
 }
 
+void LlmAgentExecutor::setAppResourceFetcher(AppResourceFetcher fetcher) {
+    m_appResourceFetcher = fetcher;
+}
+
 void LlmAgentExecutor::setDiagnosticContext(const QString& apiUrl, const QString& apiKey, const QString& modelName) {
     m_diagApiUrl = apiUrl;
     m_diagApiKey = apiKey;
@@ -133,13 +137,35 @@ void LlmAgentExecutor::nextStep(
             }
 
             m_toolDispatcher(dec.toolName, dec.toolArguments, [this, dec, availableTools, onFinish](mcp_qt::McpResult res) {
-                // MCP Apps：工具返回 text/html;profile=mcp-app 内容 → 交给宿主内嵌渲染
+                // MCP Apps 内联：工具结果含 text/html;profile=mcp-app 内容 → 直接渲染
                 const QString appMime = QString::fromUtf8(mcp_qt::kMcpAppMimeType);
+                bool appEmitted = false;
                 for (const auto& c : res.contents) {
                     if (c.mimeType == appMime && !c.text.isEmpty()) {
-                        emit mcpAppContentAvailable(c.text, dec.toolName);
+                        const QJsonObject uiMeta = res.data.value(QStringLiteral("_meta")).toObject().value(QStringLiteral("ui")).toObject();
+                        emit mcpAppContentAvailable(c.text, dec.toolName, uiMeta,
+                                                    dec.toolArguments, res.data);
+                        appEmitted = true;
                         break;
                     }
+                }
+                // MCP Apps 引用式由工具声明的 _meta.ui.resourceUri 决定。不能依赖
+                // 某个 App 在工具结果里额外返回 viewUUID；规范 App 可以只返回普通
+                // structuredContent（Three.js/System Monitor 等即采用这种形式）。
+                if (!appEmitted && !res.isError && m_appResourceFetcher) {
+                    m_appResourceFetcher(dec.toolName, [this, dec, res](const QString& html, const QJsonObject& uiMeta, const QString& error) {
+                        if (!error.isEmpty()) {
+                            // 普通非 App 工具没有 resourceUri 是正常情况，不污染日志。
+                            if (!error.contains(QStringLiteral("未声明 _meta.ui.resourceUri"))) {
+                                qWarning().noquote() << "[LlmAgentExecutor] MCP Apps 资源获取失败:" << error;
+                            }
+                            return;
+                        }
+                        if (!html.isEmpty()) {
+                            emit mcpAppContentAvailable(html, dec.toolName, uiMeta,
+                                                        dec.toolArguments, res.data);
+                        }
+                    });
                 }
 
                 QString obs;

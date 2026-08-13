@@ -147,6 +147,10 @@ private:
     std::shared_ptr<McpQtClient> m_client;
     bool m_running{false};
     bool m_initialized{false};  // 已收到 ui/notifications/initialized（规范：此前 MUST NOT 发消息）
+    bool m_hasPendingToolInput{false};
+    bool m_hasPendingToolResult{false};
+    QJsonObject m_pendingToolInput;
+    QJsonObject m_pendingToolResult;
 
     QString m_hostName{QStringLiteral("mcp-qt-client")};
     QString m_hostVersion{QStringLiteral("1.0.0")};

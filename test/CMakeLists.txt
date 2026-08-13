@@ -18,6 +18,10 @@ add_executable(tests_qt
     test_qt_stateless_session.cpp
     test_qt_highlevel_stateless.cpp
     test_qt_mcp_app_bridge.cpp
+    test_mcp_app_content_adapter.cpp
+    test_multi_agent_registry.cpp
+    ../examples/multi_server_agent/AgentRegistry.cpp
+    ../examples/multi_server_agent/AgentReconciler.cpp
     test_es256_jwt.cpp
 )
 
@@ -35,7 +39,6 @@ target_link_libraries(tests_qt PRIVATE
     mcp_qt_transport
     mcp_qt_client
     mcp_qt_apps
-    multi_server_agent_core
     Qt6::Core
     Qt6::Network
     Qt6::Test

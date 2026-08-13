@@ -26,6 +26,61 @@ AgentSession::AgentSession(mcp_qt::McpHost* host,
             cb(result);
         });
     });
+
+    // MCP Apps 引用式：从工具声明的 ui.resourceUri 取回 HTML；不依赖工具结果私有字段。
+    m_executor->setAppResourceFetcher([this](const QString& toolName, std::function<void(const QString& html, const QJsonObject& uiMeta, const QString& error)> cb) {
+        const auto pair = m_host->toolRouter()->parseToolName(toolName);
+        auto client = m_host->client(pair.first);
+        if (!client) { cb({}, {}, QStringLiteral("no client for ") + pair.first); return; }
+
+        QString resourceUri;
+        for (const auto& t : client->cachedTools()) {
+            if (t.name == pair.second) {
+                resourceUri = t.meta.value(QStringLiteral("ui")).toObject().value(QStringLiteral("resourceUri")).toString();
+                break;
+            }
+        }
+        if (resourceUri.isEmpty()) {
+            cb({}, {}, QStringLiteral("工具 %1 未声明 _meta.ui.resourceUri").arg(toolName));
+            return;
+        }
+
+        client->readResourceAsync(resourceUri, [cb](const QJsonObject& result, const QString& error) {
+            if (!error.isEmpty()) { cb({}, {}, error); return; }
+            const QJsonArray contents = result.value(QStringLiteral("contents")).toArray();
+            for (const auto& c : contents) {
+                const QJsonObject o = c.toObject();
+                if (o.value(QStringLiteral("mimeType")).toString().contains(QStringLiteral("mcp-app"))) {
+                    const QJsonObject uiMeta = o.value(QStringLiteral("_meta")).toObject().value(QStringLiteral("ui")).toObject();
+                    cb(o.value(QStringLiteral("text")).toString(), uiMeta, {});
+                    return;
+                }
+            }
+            cb({}, {}, QStringLiteral("ui 资源未包含 mcp-app 内容"));
+        });
+    });
+}
+
+// ============================================================================
+// setServerFilter(): 限定该 agent 可见的服务器（serverName_ 前缀白名单）
+// ============================================================================
+void AgentSession::setServerFilter(const QStringList& servers) {
+    m_serverFilter = servers;
+}
+
+// 从全量工具中筛出属于指定服务器集合的工具（按 "serverName_" 前缀匹配）。
+static QJsonArray filterToolsByServers(const QJsonArray& allTools, const QStringList& servers) {
+    if (servers.isEmpty()) return allTools;
+    QJsonArray filtered;
+    for (const auto& t : allTools) {
+        const QString name = t.toObject().value(QStringLiteral("function")).toObject().value(QStringLiteral("name")).toString();
+        bool keep = false;
+        for (const QString& s : servers) {
+            if (name.startsWith(s + QStringLiteral("_"))) { keep = true; break; }
+        }
+        if (keep) filtered.append(t);
+    }
+    return filtered;
 }
 
 // ============================================================================
@@ -52,14 +107,14 @@ void AgentSession::runTask(const QString& task) {
 
     qInfo().noquote() << "[AgentSession] runTask:" << task;
 
-    QJsonArray tools = m_host->exportAllToolsToLlm();
+    QJsonArray tools = filterToolsByServers(m_host->exportAllToolsToLlm(), m_serverFilter);
 
     if (tools.isEmpty()) {
         finishWithError("tool/discovery", "No tools available", "Ensure MCP servers are online");
         return;
     }
 
-    qInfo().noquote() << "[AgentSession] 启动 ReAct:" << tools.size() << "个工具";
+    qInfo().noquote() << "[AgentSession] 启动 ReAct:" << tools.size() << "个工具（过滤后）";
     if (m_host->reporter()) m_host->reporter()->addInfo("tool/discovery", QStringLiteral("%1 tools loaded").arg(tools.size()));
 
     QPointer<AgentSession> safeThis(this);
@@ -76,7 +131,7 @@ void AgentSession::continueConversation(const QString& task, const QString&) {
     m_finished = false;
     if (m_watchdogTimer) m_watchdogTimer->start(m_timeoutMs * 6);
 
-    QJsonArray tools = m_host->exportAllToolsToLlm();
+    QJsonArray tools = filterToolsByServers(m_host->exportAllToolsToLlm(), m_serverFilter);
     QPointer<AgentSession> safeThis(this);
     m_executor->continueRun(task, tools, [safeThis](bool ok, QString answer) {
         if (!safeThis) return;

@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 760" font-family="Segoe UI, Microsoft YaHei, system-ui, sans-serif">
+  <!-- 多 agent × 多 MCP 当前布局线框图 v4：agent+MCP 下拉在看板标题右侧，输入框在看板底部 -->
+  <defs>
+    <style>
+      .muted { fill:#5b6472; }
+      .faint { fill:#8a93a3; }
+      .ink { fill:#1c2128; }
+      .accent { fill:#2f6fed; }
+      .good { fill:#1f9d57; }
+      .dim { fill:#9aa3b2; }
+      .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; fill: #8a93a3; }
+      .field { fill:#ffffff; stroke:#d7dce3; }
+      .ground { fill:#f6f7f9; stroke:#d7dce3; }
+      .soft { fill:#e8eefc; }
+    </style>
+  </defs>
+
+  <!-- 窗体外框 -->
+  <rect x="40" y="24" width="900" height="690" rx="10" fill="#ffffff" stroke="#5b6b80" stroke-width="1.5"/>
+  <rect x="40" y="24" width="900" height="30" rx="10" fill="#e8eefc" stroke="#94a0b0"/>
+  <rect x="40" y="44" width="900" height="10" fill="#e8eefc"/>
+  <circle cx="54" cy="39" r="3" fill="#d43f3f"/>
+  <circle cx="64" cy="39" r="3" fill="#e8a33d"/>
+  <circle cx="74" cy="39" r="3" fill="#1f9d57"/>
+  <text x="60" y="44" font-size="12" class="muted">MCP Qt ReAct Agent 浏览器探索工具</text>
+
+  <!-- ① 配置区 -->
+  <text x="60" y="86" font-size="12" class="muted">MCP 配置文件:</text>
+  <rect x="150" y="70" width="540" height="24" rx="4" class="field"/>
+  <text x="158" y="86" font-size="11" class="faint">examples/multi_server_agent/examples_config.json</text>
+  <rect x="700" y="70" width="74" height="24" rx="4" class="soft" stroke="#94a0b0"/>
+  <text x="717" y="86" font-size="11" class="accent">浏览文件</text>
+  <rect x="782" y="70" width="74" height="24" rx="4" class="soft" stroke="#94a0b0"/>
+  <text x="799" y="86" font-size="11" class="accent">刷新/重载</text>
+
+  <text x="60" y="120" font-size="12" class="muted">日志输出文件:</text>
+  <rect x="150" y="104" width="540" height="24" rx="4" class="field"/>
+  <text x="158" y="120" font-size="11" class="faint">（可选）运行日志同步追加写入...</text>
+  <rect x="700" y="104" width="74" height="24" rx="4" class="soft" stroke="#94a0b0"/>
+  <text x="717" y="120" font-size="11" class="accent">选择位置</text>
+
+  <!-- 大模型配置 -->
+  <rect x="60" y="140" width="856" height="58" rx="6" class="ground"/>
+  <text x="74" y="160" font-size="11" class="muted">大模型模式:</text>
+  <rect x="150" y="148" width="120" height="20" rx="4" class="field"/>
+  <text x="158" y="162" font-size="10" class="muted">在线 OpenAI 兼容 API ▾</text>
+  <text x="290" y="160" font-size="11" class="muted">接口地址:</text>
+  <rect x="346" y="148" width="250" height="20" rx="4" class="field"/>
+  <text x="354" y="162" font-size="10" class="faint">https://api.deepseek.com/v1/chat/completions</text>
+  <text x="74" y="186" font-size="11" class="muted">API 密钥:</text>
+  <rect x="150" y="174" width="180" height="20" rx="4" class="field"/>
+  <text x="158" y="188" font-size="10" class="faint">••••••••••••</text>
+  <text x="350" y="186" font-size="11" class="muted">模型名称:</text>
+  <rect x="410" y="174" width="150" height="20" rx="4" class="field"/>
+  <text x="418" y="188" font-size="10" class="muted">deepseek-chat ▾</text>
+  <rect x="568" y="174" width="80" height="20" rx="4" class="soft" stroke="#94a0b0"/>
+  <text x="580" y="188" font-size="10" class="accent">同步模型列表</text>
+
+  <!-- ② 左侧：QTabWidget（服务端日志 / MCP 总服务） -->
+  <rect x="60" y="214" width="300" height="434" rx="8" class="ground"/>
+  <!-- tab 栏 -->
+  <rect x="60" y="214" width="300" height="28" rx="8" fill="#e8eefc" stroke="#94a0b0"/>
+  <rect x="60" y="232" width="300" height="10" fill="#e8eefc"/>
+  <rect x="72" y="218" width="82" height="20" rx="4" fill="#ffffff" stroke="#94a0b0"/>
+  <text x="82" y="232" font-size="11" class="muted">服务端日志</text>
+  <rect x="158" y="218" width="88" height="20" rx="4" fill="#2f6fed"/>
+  <text x="168" y="232" font-size="11" fill="#ffffff">MCP 总服务</text>
+  <!-- 活动 tab 内容：MCP 总服务（全部配置的服务器 + 状态） -->
+  <rect x="76" y="250" width="268" height="382" rx="6" class="field"/>
+  <circle cx="92" cy="272" r="4" class="good"/>
+  <text x="104" y="276" font-size="11.5" class="ink">memory</text>
+  <text x="330" y="276" font-size="11" class="faint" text-anchor="end">9 tools</text>
+  <circle cx="92" cy="294" r="4" class="good"/>
+  <text x="104" y="298" font-size="11.5" class="ink">everything</text>
+  <text x="330" y="298" font-size="11" class="faint" text-anchor="end">16 tools</text>
+  <circle cx="92" cy="316" r="4" fill="#9aa3b2"/>
+  <text x="104" y="320" font-size="11.5" class="ink">fetch</text>
+  <text x="330" y="320" font-size="10" class="faint" text-anchor="end">未引用</text>
+  <circle cx="92" cy="338" r="4" fill="#9aa3b2"/>
+  <text x="104" y="342" font-size="11.5" class="ink">filesystem</text>
+  <text x="330" y="342" font-size="10" class="faint" text-anchor="end">未引用</text>
+  <circle cx="92" cy="360" r="4" fill="#9aa3b2"/>
+  <text x="104" y="364" font-size="11.5" class="ink">playwright</text>
+  <text x="330" y="364" font-size="10" class="faint" text-anchor="end">未引用</text>
+  <circle cx="92" cy="382" r="4" fill="#9aa3b2"/>
+  <text x="104" y="386" font-size="11.5" class="ink">mcp-apps-mock</text>
+  <text x="330" y="386" font-size="10" class="faint" text-anchor="end">未引用</text>
+
+  <!-- ③ ReAct 看板：标题右侧 = agent+MCP 下拉；底部 = 输入框 -->
+  <rect x="376" y="214" width="540" height="434" rx="8" class="ground"/>
+  <text x="392" y="240" font-size="12" class="muted">ReAct 执行过程看板:</text>
+  <rect x="668" y="226" width="92" height="24" rx="4" fill="#ffffff" stroke="#5b6b80"/>
+  <text x="676" y="242" font-size="11" class="ink">agentA ▾</text>
+  <text x="768" y="240" font-size="11" class="muted">MCP:</text>
+  <rect x="806" y="226" width="110" height="24" rx="4" fill="#ffffff" stroke="#5b6b80"/>
+  <text x="814" y="242" font-size="11" class="ink">memory ▾</text>
+
+  <!-- 看板内容 -->
+  <rect x="392" y="250" width="508" height="326" rx="6" class="field"/>
+  <text x="410" y="282" font-size="12" class="muted">🧠 大模型推理决策</text>
+  <rect x="410" y="290" width="470" height="14" rx="3" class="soft"/>
+  <text x="418" y="301" font-size="10.5" class="muted">我需要查询知识图谱...</text>
+  <text x="410" y="336" font-size="12" class="muted">🔧 工具调用</text>
+  <rect x="410" y="344" width="470" height="14" rx="3" class="soft"/>
+  <text x="418" y="355" font-size="10.5" class="muted">memory_create_entities(...)</text>
+  <text x="410" y="392" font-size="12" class="muted">✅ 观察结果</text>
+  <rect x="410" y="400" width="470" height="14" rx="3" class="soft"/>
+  <text x="418" y="411" font-size="10.5" class="muted">实体已创建，返回确认...</text>
+  <text x="410" y="448" font-size="11" class="faint">···（后续步骤）</text>
+
+  <!-- MCP App 分屏 -->
+  <rect x="410" y="470" width="470" height="52" rx="6" class="soft" stroke="#94a0b0" stroke-dasharray="4 3"/>
+  <text x="420" y="500" font-size="11" class="accent">MCP App 渲染（工具返回交互界面时展开）</text>
+
+  <!-- 输入框：看板底部 -->
+  <rect x="392" y="582" width="508" height="50" rx="6" class="field"/>
+  <rect x="402" y="588" width="356" height="38" rx="4" class="ground"/>
+  <text x="410" y="610" font-size="11" class="faint">输入任务，如「search for AI news」...</text>
+  <rect x="764" y="588" width="72" height="38" rx="4" fill="#2f6fed"/>
+  <text x="778" y="612" font-size="11" fill="#ffffff" font-weight="600">⚡ 发送</text>
+  <rect x="840" y="588" width="50" height="38" rx="4" class="field"/>
+  <text x="851" y="612" font-size="11" class="muted">新建</text>
+
+  <!-- 区域标注 -->
+  <text x="60" y="220" class="mono">① 配置区（MCP 配置 + 日志 + 大模型）</text>
+  <text x="60" y="262" class="mono">② 左侧 = QTabWidget（服务端日志 / MCP 总服务）</text>
+  <text x="376" y="262" class="mono">③ ReAct 看板（标题右 = agent+MCP 下拉；底部 = 输入框）</text>
+
+  <!-- agent → MCP 下拉联动 -->
+  <path d="M 760 250 L 768 250" stroke="#2f6fed" stroke-width="1" stroke-dasharray="3 3" opacity=".6" fill="none"/>
+  <text x="712" y="218" font-size="10" fill="#2f6fed" class="mono">agent → MCP 下拉联动</text>
+</svg>

@@ -13,11 +13,13 @@
 //   - 隔离进程渲染（WebView2 原生沙箱语义）
 
 #include "IMcpAppRenderer.h"
+#include "McpAppContentAdapter.h"
 #include <QJsonObject>
 #include <QPointer>
 #include <QSet>
 #include <QStringList>
 #include <QTimer>
+#include <QTemporaryDir>
 #include <QUrl>
 #include <QWidget>
 #include <functional>
@@ -69,11 +71,24 @@ public:
                              const std::vector<QString>& allowedCapabilities) override;
     void setUiMeta(const QJsonObject& uiMeta) override;
 
+    /// Replace the ordered compatibility adapter registry. nullptr disables adapters.
+    void setContentAdapterRegistry(std::shared_ptr<McpAppContentAdapterRegistry> registry);
+
     /**
      * @brief 异步初始化 WebView2（首次调用自动创建环境/控制器）。
      * @param onReady 初始化完成回调（成功 true）
      */
     void initializeAsync(std::function<void(bool ok, const QString& error)> onReady = nullptr);
+
+    /**
+     * @brief 用 WebView2 自身渲染内容截图并保存 PNG。
+     *        GDI grabWindow/PrintWindow 抓不到 WebView2 的 DirectComposition 表面
+     *        （常得到空白），CapturePreview 是 WebView2 官方截图接口，异步回调。
+     * @param path 保存路径（临时文件写入成功后原子改名落盘）
+     * @param onDone 完成回调 (ok, error)
+     */
+    void capturePreviewToFile(const QString& path,
+                              std::function<void(bool ok, const QString& error)> onDone = nullptr);
 
     /**
      * @brief 当前是否已初始化（可导航）。
@@ -95,6 +110,7 @@ protected:
 private:
     void ensureInitialized();
     void loadSandboxShell();
+    void updateViewportBounds();   // 把 WebView2 视口同步为控件当前尺寸
     void sendSandboxResourceReady();
     void handleWebMessage(const QString& json);
     void postToJs(const QString& jsonString);
@@ -106,10 +122,14 @@ private:
     void* m_webview{nullptr};         // ICoreWebView2*
     bool m_ready{false};
     bool m_initStarted{false};
+    bool m_sandboxVirtualHostReady{false}; // 壳页使用虚拟 HTTPS 来源，避免 srcdoc/Worker 继承 opaque origin
     bool m_navCompleted{false};       // 最近一次沙箱导航是否完成（看门狗用）
+    std::unique_ptr<QTemporaryDir> m_virtualHostRoot;
+    QString m_virtualAppDir;
     QString m_pendingHtml;
     QUrl m_pendingBaseUrl;
     QJsonObject m_uiMeta;             // 最近一次 setUiMeta（_meta.ui：csp/permissions）
+    std::shared_ptr<McpAppContentAdapterRegistry> m_contentAdapters;
 
     std::function<void(const QJsonObject&)> m_messageHandler;
     std::function<void(bool, const QString&)> m_onReady;

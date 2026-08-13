@@ -23,6 +23,11 @@ McpAppBridge::~McpAppBridge() = default;
 void McpAppBridge::attach(IMcpAppRenderer* renderer, std::shared_ptr<McpQtClient> client) {
     m_renderer = renderer;
     m_client = std::move(client);
+    m_initialized = false;
+    m_hasPendingToolInput = false;
+    m_hasPendingToolResult = false;
+    m_pendingToolInput = QJsonObject{};
+    m_pendingToolResult = QJsonObject{};
 }
 
 void McpAppBridge::start() {
@@ -134,6 +139,20 @@ void McpAppBridge::handleMessage(const QJsonObject& message) {
     } else if (method == QStringLiteral("ui/notifications/initialized")) {
         m_initialized = true;
         qDebug() << "[McpAppBridge] View initialized; host may now send notifications";
+        // 工具参数必须先于结果到达 View。App 通常用 tool-input 定位/初始化视图，
+        // 再用 tool-result 合并服务端返回状态。
+        if (m_hasPendingToolInput) {
+            const QJsonObject pending = m_pendingToolInput;
+            m_hasPendingToolInput = false;
+            m_pendingToolInput = QJsonObject{};
+            sendToolInput(pending);
+        }
+        if (m_hasPendingToolResult) {
+            const QJsonObject pending = m_pendingToolResult;
+            m_hasPendingToolResult = false;
+            m_pendingToolResult = QJsonObject{};
+            sendToolResult(pending);
+        }
     } else if (method == QStringLiteral("ui/notifications/size-changed")) {
         const int w = params.value(QStringLiteral("width")).toInt(0);
         const int h = params.value(QStringLiteral("height")).toInt(0);
@@ -325,8 +344,21 @@ void McpAppBridge::handleUpdateModelContext(const QJsonObject& params, qint64 id
 void McpAppBridge::handleRequestDisplayMode(const QJsonObject& params, qint64 id) {
     if (m_requestDisplayModeHandler) {
         m_requestDisplayModeHandler(params, [this, id](const QJsonObject& result, int code, const QString& msg) {
-            if (code == 0) sendResponse(id, result);
-            else sendError(id, code, msg);
+            if (code != 0) {
+                sendError(id, code, msg);
+                return;
+            }
+
+            const QString actualMode = result.value(QStringLiteral("mode")).toString();
+            const bool changed = !actualMode.isEmpty() && actualMode != m_displayMode;
+            if (changed) {
+                m_displayMode = actualMode;
+                emit displayModeChanged(actualMode);
+            }
+            sendResponse(id, result);
+            if (changed) {
+                sendHostContextChanged(QJsonObject{{QStringLiteral("displayMode"), actualMode}});
+            }
         });
         return;
     }
@@ -335,9 +367,15 @@ void McpAppBridge::handleRequestDisplayMode(const QJsonObject& params, qint64 id
     const bool appOk = m_appDisplayModes.isEmpty() || m_appDisplayModes.contains(requested);
     const bool hostOk = m_availableDisplayModes.contains(requested);
     if (!requested.isEmpty() && appOk && hostOk) {
+        const bool changed = requested != m_displayMode;
         m_displayMode = requested;
-        emit displayModeChanged(requested);
+        if (changed) emit displayModeChanged(requested);
         sendResponse(id, QJsonObject{{QStringLiteral("mode"), requested}});
+        // App 通过 hostContext 维护自身的当前显示模式。只返回 RPC 结果会导致
+        // App 仍认为自己处于旧模式，无法把 fullscreen 再切回 inline。
+        if (changed) {
+            sendHostContextChanged(QJsonObject{{QStringLiteral("displayMode"), requested}});
+        }
     } else {
         sendResponse(id, QJsonObject{{QStringLiteral("mode"), m_displayMode}});
     }
@@ -345,7 +383,12 @@ void McpAppBridge::handleRequestDisplayMode(const QJsonObject& params, qint64 id
 
 // ========== Host → View 通知 ==========
 void McpAppBridge::sendToolInput(const QJsonObject& arguments) {
-    if (!m_running || !m_initialized || !m_renderer) return;
+    if (!m_running || !m_renderer) return;
+    if (!m_initialized) {
+        m_pendingToolInput = arguments;
+        m_hasPendingToolInput = true;
+        return;
+    }
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-input")},
@@ -363,7 +406,12 @@ void McpAppBridge::sendToolInputPartial(const QJsonObject& arguments) {
 }
 
 void McpAppBridge::sendToolResult(const QJsonObject& callToolResult) {
-    if (!m_running || !m_initialized || !m_renderer) return;
+    if (!m_running || !m_renderer) return;
+    if (!m_initialized) {
+        m_pendingToolResult = callToolResult;
+        m_hasPendingToolResult = true;
+        return;
+    }
     m_renderer->sendMessageToApp(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/tool-result")},

@@ -425,21 +425,19 @@ void test_qt_mcp_app_bridge_initialized_gate() {
     bridge.attach(&renderer, nullptr);
     bridge.start();
 
-    // 未初始化 → 主动通知被丢弃
+    // 未初始化 → 主动通知暂存，不得提前发给 View
     bridge.sendToolInput(QJsonObject{{QStringLiteral("a"), 1}});
     bridge.sendToolResult(QJsonObject{{QStringLiteral("content"), QJsonArray{}}});
     bridge.teardownResource(QString());
     TM_ASSERT_EQ(renderer.sentMessages.size(), 0, "no host messages before ui/notifications/initialized");
 
-    // 收到 initialized → 可发送
+    // 收到 initialized → 自动按 input/result 顺序冲刷暂存通知
     renderer.handler(QJsonObject{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), QStringLiteral("ui/notifications/initialized")},
         {QStringLiteral("params"), QJsonObject{}}
     });
-    bridge.sendToolInput(QJsonObject{{QStringLiteral("a"), 1}});
-    bridge.sendToolResult(QJsonObject{{QStringLiteral("content"), QJsonArray{}}});
-    TM_ASSERT_EQ(renderer.sentMessages.size(), 2, "host may send after initialized");
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 2, "queued host messages should flush after initialized");
     if (renderer.sentMessages.size() < 2) return;
     TM_ASSERT_TRUE(renderer.sentMessages.at(0).value(QStringLiteral("method")).toString() == QStringLiteral("ui/notifications/tool-input"), "first should be tool-input");
     TM_ASSERT_TRUE(renderer.sentMessages.at(1).value(QStringLiteral("method")).toString() == QStringLiteral("ui/notifications/tool-result"), "second should be tool-result");
@@ -520,6 +518,12 @@ void test_qt_mcp_app_bridge_display_mode_negotiation() {
     });
     renderer.sentMessages.clear();
 
+    // Host 在 View 发出 initialized 之前 MUST NOT 主动发送通知。
+    renderer.handler(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("ui/notifications/initialized")}
+    });
+
     // 请求合法模式（App 与 Host 都支持）
     bool modeChanged = false;
     QString changedMode;
@@ -531,11 +535,18 @@ void test_qt_mcp_app_bridge_display_mode_negotiation() {
         {QStringLiteral("method"), QStringLiteral("ui/request-display-mode")},
         {QStringLiteral("params"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("fullscreen")}}}
     });
-    TM_ASSERT_EQ(renderer.sentMessages.size(), 1, "should respond to request-display-mode");
-    if (renderer.sentMessages.isEmpty()) return;
+    TM_ASSERT_EQ(renderer.sentMessages.size(), 2, "should respond and notify host-context change");
+    if (renderer.sentMessages.size() < 2) return;
     const QJsonObject result1 = renderer.sentMessages.first().value(QStringLiteral("result")).toObject();
     TM_ASSERT_TRUE(result1.value(QStringLiteral("mode")).toString() == QStringLiteral("fullscreen"), "advertised+supported mode should be accepted");
     TM_ASSERT_TRUE(modeChanged && changedMode == QStringLiteral("fullscreen"), "displayModeChanged signal should fire");
+    const QJsonObject notification = renderer.sentMessages.at(1);
+    TM_ASSERT_TRUE(notification.value(QStringLiteral("method")).toString()
+                       == QStringLiteral("ui/notifications/host-context-changed"),
+                   "accepted display mode should notify host-context change");
+    TM_ASSERT_TRUE(notification.value(QStringLiteral("params")).toObject()
+                       .value(QStringLiteral("displayMode")).toString() == QStringLiteral("fullscreen"),
+                   "host-context notification should contain the actual display mode");
 
     // 请求 App 未声明的 inline → 拒绝，返回当前实际模式（fullscreen）
     renderer.sentMessages.clear();
