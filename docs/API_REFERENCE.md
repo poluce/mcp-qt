@@ -5,10 +5,12 @@
 - [快速开始](#快速开始)
 - [McpQtClient —— 主客户端](#mcpqtclient--主客户端)
 - [McpQtClientBuilder —— 构造器](#mcpqtclientbuilder--构造器)
+- [MCP 2026-07-28 API](#mcp-2026-07-28-api)
 - [同步 API](#同步-api)
 - [异步 API](#异步-api)
 - [类型化结果](#类型化结果)
 - [双向能力](#双向能力)
+- [MCP Apps](#mcp-apps)
 - [MVC 模型绑定](#mvc-模型绑定)
 - [聚合类 API](#聚合类-api)
   - [McpHost](#mcphost)
@@ -101,6 +103,7 @@ QObject::connect(client.get(), &McpQtClient::connected, []{
 | `toolCalled(name, args)` | `QString`, `QJsonObject` | 工具调用开始 |
 | `toolFinished(name, result)` | `QString`, `McpResult` | 工具调用完成 |
 | `progressReported(name, prog, total, msg)` | `QString`, `float`, `float`, `QString` | 工具进度更新 |
+| `inputRequired(reqId, inputRequests, requestState, replyCb)` | `QString`, `QJsonObject`, `QString`, `MrtrReplyCallback` | 2026-07-28 MRTR：服务端 `input_required`，调用 `replyCb(inputResponses)` 重试 |
 | `reconnecting()` | — | 开始重连 |
 | `reconnected()` | — | 重连成功 |
 | `recoveryFailed(msg)` | `QString` | 重连失败 |
@@ -117,6 +120,11 @@ QObject::connect(client.get(), &McpQtClient::connected, []{
 | `hasPromptsCapability()` | `bool` | 服务器支持 prompts |
 | `hasResourcesCapability()` | `bool` | 服务器支持 resources |
 | `isConnected()` | `bool` | 连接是否活跃 |
+| `setStatelessMode(enabled)` / `isStatelessMode()` | `void` / `bool` | 切换 2026-07-28 无握手路径 |
+| `setProtocolVersion(ver)` | `void` | 覆盖后续请求使用的协议版本 |
+| `discoverServer()` / `discoverServerAsync(...)` | `DiscoverInfo` | `server/discover`（SEP-2575） |
+| `listenSubscriptions(filter)` / `listenSubscriptionsAsync(...)` | `bool` / `void` | `subscriptions/listen` |
+| `registerMcpAppCapabilities()` | `void` | 声明 `io.modelcontextprotocol/ui` |
 
 ---
 
@@ -154,8 +162,101 @@ auto client = builder.buildAndConnectAsync();
 | `setHttpHeaders(headers)` | `QMap<QString,QString>` | 自定义 HTTP 请求头 |
 | `setHttpProxy(proxy)` | `QNetworkProxy` | HTTP 代理服务器 |
 | `setReconnectPolicy(policy)` | `McpReconnectPolicy` | 重连策略 |
+| `setProtocolVersion(ver)` | `QString` | 协议版本（默认 `2026-07-28`） |
+| `setStatelessMode(enabled)` | `bool` | 无状态模式（免握手 + 每请求 `_meta`） |
+| `setRequestLogLevel(level)` | `QString` | 每请求 `_meta` logLevel；空串停止注入 |
+| `setTraceContext(ctx)` | `McpTraceContext` | W3C `traceparent` / `tracestate` / `baggage` |
 | `buildAndConnectAndWait(err)` | → `Ptr` | 同步构建并连接 |
 | `buildAndConnectAsync()` | → `Ptr` | 异步构建并连接 |
+
+---
+
+## MCP 2026-07-28 API
+
+与根目录 `README.md` 对外宣传的无状态能力对应。底层 session 另有 `listToolsWithCache` 等命名；Qt 客户端用带 `McpCacheHint*` 的 `listTools` / `listResources` / `listPrompts` 重载。
+
+### 无状态连接
+
+```cpp
+auto client = mcp_qt::McpQtClientBuilder()
+    .setTransportStatelessHttp("http://localhost:8080/mcp")
+    .setProtocolVersion("2026-07-28")
+    .setStatelessMode(true)
+    .buildAndConnectAsync();
+```
+
+`setStatelessMode(true)` 后不再走 `initialize` 握手；每个请求的 `_meta` 携带 `protocolVersion` 与 `clientCapabilities`。
+
+### server/discover
+
+```cpp
+McpQtClient::DiscoverInfo info = client->discoverServer();
+qDebug() << info.supportedVersions << info.serverInfo << info.ttlMs << info.cacheScope;
+
+client->discoverServerAsync([](const McpQtClient::DiscoverInfo& info, const QString& error) {
+    if (!error.isEmpty()) return;
+    qDebug() << info.capabilities;
+});
+```
+
+### MRTR（`inputRequired`）
+
+服务端返回 `resultType: "input_required"` 时发出信号。`requestState` 由库在重试时原样回显；调用方组 `InputResponses` 后调用 `replyCb`。
+
+```cpp
+QObject::connect(client.get(), &mcp_qt::McpQtClient::inputRequired,
+    [](const QString& reqId, const QJsonObject& inputRequests,
+       const QString& requestState, mcp_qt::MrtrReplyCallback replyCb) {
+        QJsonObject inputResponses;
+        for (auto it = inputRequests.begin(); it != inputRequests.end(); ++it) {
+            const QJsonObject req = it.value().toObject();
+            if (req.value("method").toString() == "elicitation/create") {
+                inputResponses[it.key()] = QJsonObject{
+                    {"action", "accept"},
+                    {"content", QJsonObject{{"password", "secret123"}}}
+                };
+            }
+        }
+        Q_UNUSED(reqId);
+        Q_UNUSED(requestState);
+        replyCb(inputResponses);
+    });
+```
+
+`McpHost` 会再转成带 `serverName` 的 `inputRequired` 信号。
+
+### subscriptions/listen
+
+```cpp
+client->listenSubscriptions({{"toolsListChanged", true}});
+client->listenSubscriptionsAsync(filter, [](bool ok, const QString& err) { /* ... */ });
+client->cancelSubscription(requestId);
+```
+
+通知仍走 `notificationReceived`。旧的 `subscribeResource` / `unsubscribeResource` 留给 legacy 路径。
+
+### CacheableResult
+
+```cpp
+mcp_qt::McpCacheHint hint;
+auto tools = client->listTools(&hint);
+qDebug() << hint.ttlMs << hint.cacheScope;
+```
+
+`listResources` / `listPrompts` 同样有 `McpCacheHint*` 重载。
+
+### per-request logLevel 与 W3C Trace
+
+```cpp
+client->setRequestLogLevel("debug");   // 注入 _meta.io.modelcontextprotocol/logLevel
+client->setRequestLogLevel("");        // 停止
+
+mcp_qt::McpTraceContext trace;
+trace.traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+client->setTraceContext(trace);
+```
+
+`setLoggingLevel("debug")` 在 2026-07-28 下会改走 per-request logLevel；新代码请直接用 `setRequestLogLevel`。
 
 ---
 
@@ -198,9 +299,10 @@ std::vector<McpQtTool> cached = client->cachedTools();
 
 ```cpp
 struct McpQtTool {
-    QString name;           // 工具名称
-    QString description;    // 描述
+    QString name;            // 工具名称
+    QString description;     // 描述
     QJsonObject inputSchema; // 参数 JSON Schema
+    QJsonObject meta;        // 顶层 _meta（MCP Apps：ui.resourceUri / ui.visibility 等）
 };
 ```
 
@@ -314,26 +416,7 @@ QJsonObject completion = client->complete(
 // 设置服务端日志级别（2026-07-28 下自动改用 per-request logLevel）
 bool ok = client->setLoggingLevel("debug");
 
-// 🌟 MCP 2026-07-28 per-request logLevel（SEP-2577）：
-// 在后续每个请求的 _meta 注入 io.modelcontextprotocol/logLevel，
-// 服务端据此决定是否在该请求响应流上回传 notifications/message 日志。
-// 传空字符串停止注入。仅 stateless / 2026-07-28 模式生效。
-client->setRequestLogLevel("debug");   // 启用，请求级别 debug
-client->setRequestLogLevel("");        // 停止注入
-
-// 🌟 W3C Trace Context（SEP-414 / W3C Trace-Context）：
-// 设置后 traceparent/tracestate/baggage 随每个 HTTP 请求发送，
-// 使 MCP 服务器 span 嵌套进调用方已有的分布式 trace。
-mcp_qt::McpTraceContext trace;
-trace.traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-trace.tracestate  = "congo=t61rcWkgMzE";
-trace.baggage     = "userId=alice";
-client->setTraceContext(trace);   // 可随时调用，立即更新后续请求头
-
-// Builder 中也可配置：
-McpQtClientBuilder builder;
-builder.setRequestLogLevel("info")
-       .setTraceContext(trace);
+// per-request logLevel / W3C Trace 见上文「MCP 2026-07-28 API」
 
 // 流量追踪（调试用）
 client->setTrafficLogger([](const QJsonObject& event) {
@@ -580,6 +663,30 @@ client->notifyRootsListChanged();
 
 ---
 
+## MCP Apps
+
+扩展 `io.modelcontextprotocol/ui`：服务器用 `ui://` 资源返回 `text/html;profile=mcp-app`，客户端用 WebView2 渲染，AppBridge 做 postMessage JSON-RPC。
+
+头文件：`#include <mcp_qt_apps/McpAppSupport.h>`、`McpAppWebView2Renderer.h`、`McpAppBridge.h`。
+
+```cpp
+client->registerMcpAppCapabilities();
+
+auto renderer = std::make_shared<mcp_qt::McpAppWebView2Renderer>();
+layout->addWidget(renderer->hostWidget());
+
+mcp_qt::McpAppBridge bridge;
+bridge.attach(renderer.get(), client);
+bridge.setPermissionPolicy(/* allowedTools */{}, /* allowedCapabilities */{});
+bridge.start();
+
+renderer->loadHtml(htmlFromServer, QUrl());
+```
+
+注意：`QWidget` 渲染器不要用 `std::shared_ptr` 和 `layout->addWidget` 双持有，否则退出时二次 `delete`。WebView2 坑与沙箱细节见 `docs/developer_handover.md` §3。A5/A6 跨平台后端明确暂缓。
+
+---
+
 ## MVC 模型绑定
 
 4 个 `QAbstractListModel` 子类，可直接绑定到 `QListView` 或 QML `ListView`。
@@ -805,23 +912,6 @@ if (host.reloadConfigAndRestart()) {
 } else {
     qWarning() << "重载失败（可能从未通过文件加载配置）";
 }
-```
-
-McpHost host;
-host.loadConfigFromFile("mcp_servers.json");
-
-QObject::connect(&host, &McpHost::hostReady, [&](bool ok, const QString& msg) {
-    if (!ok) qWarning() << "部分服务器启动失败:" << msg;
-
-    // 聚合导出所有工具
-    QJsonArray tools = host.exportAllToolsToLlm();
-
-    // 路由调用：github_search_code 自动路由到 github 服务器
-    host.callToolAsync("github_search_code", {{"q", "mcp-qt"}},
-        [](McpResult r) { qDebug() << r.data; });
-});
-
-host.start(30000);
 ```
 
 ---

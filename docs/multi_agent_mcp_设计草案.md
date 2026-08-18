@@ -1,7 +1,7 @@
 # 多 Agent × 多 MCP：Agent-Server 注册与生命周期管理 — 设计草案
 
-> **状态**：草案，未实现，未验证。仅探讨能力边界与取舍，不构成任何协议/契约变更。
-> 日期：2026-08-12（v3：核心从「连接复用」纠正为「Agent-Server 注册管理」）
+> **状态**：设计说明。MVP 已在 `examples/multi_server_agent` 落地（`AgentRegistry` + `AgentReconciler`），并由 `test/test_multi_agent_registry.cpp` 覆盖并集 / 反向索引 / 对账启用。本文保留决策与边界，不构成协议/契约变更。
+> 日期：2026-08-12（v3：核心从「连接复用」纠正为「Agent-Server 注册管理」）；2026-08-18 文档对齐：去掉「未实现」表述。
 
 ## 1. 核心问题（纠正后的定位）
 
@@ -46,24 +46,24 @@ agentB → {serverY, serverZ}
 |---|---|
 | 单 host 多服务器生命周期 | ✅ `McpServerManager` |
 | 前缀路由隔离 | ✅ 三 Router |
-| **agent → 服务器 的注册表** | ❌ 无（当前是「一个 host 的服务器列表」，无「agent 维度」） |
-| **期望态对账（自动起停/去重）** | ❌ 无（需手动 startServer/stopServer） |
-| **按 agent 投影工具面** | ❌ router 全量前缀，需手动按前缀筛 |
-| **变更联动（agent 增删服务器 → 工具面刷新）** | ❌ 无 |
+| **agent → 服务器 的注册表** | ✅ 示例层 `AgentRegistry`（非 SDK `McpHost` 内置；单 host 列表语义未改） |
+| **期望态对账（自动起停/去重）** | ✅ 示例层 `AgentReconciler` 监听注册表，驱动 `McpHost::setServerEnabled` |
+| **按 agent 投影工具面** | ⚠️ 仍用现有 `serverName_` 前缀路由；按 agent 过滤由调用方按注册表自行筛 |
+| **变更联动（agent 增删服务器 → 工具面刷新）** | ✅ 注册表 `changed()` → 对账刷新启用集合；工具面随 Host 既有 `globalToolsChanged` |
 
-## 4. 待补组件
+## 4. 组件落点（示例层，非协议）
 
 ### 4.1 Agent-Server 注册表（Registry）
-数据模型 + CRUD + 反向索引 + 变更事件。纯数据层，不含连接。
+已实现：`examples/multi_server_agent/AgentRegistry.h`。数据模型 + 增删改 + 反向索引 + `changed()`。纯数据层，不含连接。
 
 ### 4.2 对账管理器（Reconciler）
-监听注册表变更，驱动 `McpServerManager` 起停连接、合并重叠。可先基于现有 `McpServerManager` + 前缀路由搭建，不碰协议。
+已实现：`examples/multi_server_agent/AgentReconciler.h`。监听注册表，按并集调用 `McpHost::setServerEnabled`。重叠服务器只保留一条期望启用。
 
 ### 4.3 按 Agent 视图（Tool View）
-从注册表投影 agent 的工具面；注册表变更时联动刷新。
+未做成独立 SDK 类型：用注册表的 `serversFor(agent)` 加上现有前缀路由自行投影。
 
 ### 4.4 配置来源
-注册表初始数据来自配置（复用 `McpJsonConfigLoader` 的 `$ENV_VAR` 插值）。
+复用 `McpJsonConfigLoader` 的 `$ENV_VAR` 插值；注册表由示例在加载配置后写入。
 
 ## 5. 协议前提
 

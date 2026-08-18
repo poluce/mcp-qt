@@ -2,7 +2,8 @@
 
 > 面向后来接手者的完整流程文档。
 > 覆盖：项目概览、环境搭建、构建测试、架构导航、已完成能力、未完成项清单、接手路线图。
-> 更新日期：2026-08-08 ｜ 分支：feat/protocol-2026-07-28
+> 更新日期：2026-08-08（2026-08-18 文档对齐：测试目标、链接文件名、路线图只列未完成项）
+> 分支：feat/protocol-2026-07-28
 
 ---
 
@@ -57,10 +58,14 @@ cmake --build build
 ### 2.4 测试
 
 ```bash
-# 单元/集成测试
-./build/build_test/tests_qt.exe            # 27/27 通过
+# 单元/集成测试（目标见 test/CMakeLists.txt；产物在 build/build_test/）
+./build/build_test/tests_qt.exe
 
-# 2026-07-28 官方 conformance（32 场景）
+# 独立目标（按需）
+cmake --build build --target tests_qt_https_runtime
+cmake --build build --target tests_qt_apps_e2e
+
+# 2026-07-28 官方 conformance（已记录 32/32，见 README.md）
 npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client \
   --command "build\conformance_runner_qt\mcp_client_conformance_qt.exe" \
   --scenario request-metadata --spec-version 2026-07-28
@@ -116,14 +121,14 @@ src/
 | 编号 | 项目 | 说明 | 建议方向 |
 |:---:|------|------|---------|
 | C1 | **Tasks 扩展**（io.modelcontextprotocol/tasks，SEP-2663） | tasks/get、tasks/update、subscriptions 通知 | 实现扩展模块，参考 ext-apps 模式 |
-| C2 | **EMA 扩展**（Enterprise Managed Authorization） | ID-JAG（RFC 8693 token exchange）+ JWT-bearer 换 MCP token | 需要 RFC 7523 JWT 签名支持 |
-| C3 | **DPoP**（RFC 9449） | 访问令牌绑定密钥，请求附 proof JWT | 需要 JWT 签名 + WebView2 无关 |
-| C4 | **WIF**（Workload Identity Federation） | 工作负载用平台 JWT 认证 | 依赖 C1 的 JWT 基础设施 |
+| C2 | **EMA 扩展**（Enterprise Managed Authorization） | ID-JAG（RFC 8693 token exchange）+ JWT-bearer 换 MCP token | C9 ES256 已就绪；补 RFC 8693 token exchange |
+| C3 | **DPoP**（RFC 9449） | 访问令牌绑定密钥，请求附 proof JWT | 可复用已完成的 C9 ES256；与 WebView2 无关 |
+| C4 | **WIF**（Workload Identity Federation） | 工作负载用平台 JWT 认证 | C9 ES256 已就绪；通常还要先做 C2 |
 | C5 | **服务端角色** | 本项目是客户端 SDK，未实现 2026-07-28 服务端 | 全新领域，评估是否有必要 |
 | C6 | **MRTR sampling/roots 路径专项验证** | MRTR handler 可处理 sampling/createMessage，但 conformance 只验证了 elicitation | 写测试覆盖 sampling/roots 的 inputRequests |
 | C7 | **per-request logLevel** | ✅ 已实现：`_meta.io.modelcontextprotocol/logLevel` 注入（`McpClientSession::setLogLevel` + `McpQtClient::setRequestLogLevel`），`setLoggingLevel` 在 2026-07-28 下自动走新路径 | — |
 | C8 | **OpenTelemetry trace context** | ✅ 已实现：W3C trace context（traceparent/tracestate/baggage）经 `McpQtClient::setTraceContext` / Builder `setTraceContext` 注入每个 HTTP 请求 | — |
-| C9 | **JWT-Bearer grant** | ✅ 已实现（2026-08-08）：`private_key_pem` + ES256（P-256）生成 RFC 7523 client assertion（`src/client/src/es256jwt.cpp`，Windows 走系统 BCrypt / 非 Windows 走 OpenSSL；自含最小 P-256 点运算从 d 恢复公钥）。**已验证通过 `auth/client-credentials-jwt` conformance（2026-08-11，8/8）**，期间修复 JWT `aud` 应为授权服务器 issuer 而非 token endpoint。**剩余：RS256 及 ECDSA 其它曲线（P-384/P-521）未实现** | 解锁 C2 的 JWT 前提 / C4 / C10；RS256 需引入 RSA 签名后端 |
+| C9 | **JWT-Bearer grant** | ✅ 已实现（2026-08-08）：`private_key_pem` + ES256（P-256）生成 RFC 7523 client assertion（`src/client/src/es256jwt.cpp`，Windows 走系统 BCrypt / 非 Windows 走 OpenSSL；自含最小 P-256 点运算从 d 恢复公钥）。**已验证通过 `auth/client-credentials-jwt` conformance（2026-08-11，8/8）**，期间修复 JWT `aud` 应为授权服务器 issuer 而非 token endpoint。**剩余：RS256 及 ECDSA 其它曲线（P-384/P-521）未实现** | C2/C3/C4/C10 仍开放；RS256 另计 |
 | C10 | **`--suite all` 全量验证** | 只跑了 2026-07-28 过滤的 32 场景；extension 属性场景（dpop/wif-jwt/enterprise-managed-authorization）未跑 | 跑全量 + 补齐 extension handler |
 
 ### 5.2 MCP Apps 未完成
@@ -148,25 +153,21 @@ src/
 ## 6. 接手路线图建议
 
 ### Phase 1：熟悉（1-3 天）
-1. 读本文档 + docs/API_REFERENCE.md + docs/MCP_2026-07-28_规范对照审计.md
-2. 按 §2 搭环境，跑通 §2.4 全部测试
+1. 读本文档 + [docs/API_REFERENCE.md](API_REFERENCE.md) + [docs/mcp_2026-07-28_规范对照审计.md](mcp_2026-07-28_规范对照审计.md)（审计前三节是修复前快照）
+2. 按 §2 搭环境，构建并运行 `build/build_test/tests_qt`
 3. 跑 `multi_server_agent`（多服务器 + MCP Apps 渲染）看端到端效果
 
-### Phase 2：补协议缺口（按优先级）
-1. ~~C7 + C8（低成本，SHOULD 项）—— 半天量~~ ✅ 已完成（2026-08-08）：per-request logLevel + W3C trace context
-2. **C6**（MRTR sampling/roots 测试）—— 半天量
-3. **C1 Tasks 扩展** —— 中等量级，独立模块
-4. **C9 JWT 签名基础设施** —— 解锁 C2/C4/C10
+### Phase 2：仍开放的协议缺口（按优先级）
+已完成、勿再当待办：C7 per-request logLevel、C8 W3C trace、C9 ES256 JWT-Bearer（2026-08-11 `auth/client-credentials-jwt` 8/8）。
+1. **C1 Tasks 扩展**
+2. **C6** MRTR sampling/roots 专项测试
+3. **C2 / C3 / C4**（EMA / DPoP / WIF；RS256 仍缺）→ 然后 **C10** `--suite all`
 
-### Phase 3：完善 MCP Apps（按优先级）
-1. ~~A7 自动化测试~~ ✅ 已完成（2026-08-08）：AppBridge 协议层 7 用例
-2. ~~A1 工具调用代理 + A2 权限策略~~ ✅ 已完成（2026-08-08）：McpAppBridge
-3. ~~A3 ui/ 方言方法~~ ✅ 已完成（2026-08-08）：open-link / message / update-model-context / request-display-mode
-4. **A4 真实服务器端到端**
-4. **A5/A6 跨平台后端**（按战略需要）
+### Phase 3：MCP Apps
+A1–A4、A7、A8 已完成。剩余仅 **A5/A6**（2026-08-11 决定暂不实现）。
 
 ### Phase 4：扩展生态（可选）
-- C2 EMA / C3 DPoP / C4 WIF —— 依赖 JWT 基础设施
+- C2 EMA / C3 DPoP / C4 WIF
 - C5 服务端角色 —— 全新领域评估
 
 ## 7. 提交与协作规范
@@ -190,7 +191,7 @@ chore:     杂项
 
 ### 7.3 合并前检查清单
 
-- [ ] `tests_qt` 27/27 通过
+- [ ] `build/build_test/tests_qt` 通过（勿把 2026-08-07 的 27/27 快照当成今日用例数）
 - [ ] 2026-07-28 conformance 关键场景回归（request-metadata / sep-2322 / http-standard-headers / auth/iss-supported）
 - [ ] 旧场景 spot check（initialize / tools_call 2025-11-25）
 - [ ] `multi_server_agent` 运行验证（若涉及 MCP Apps）
@@ -212,5 +213,6 @@ chore:     杂项
 | MCP Apps 文档 | https://modelcontextprotocol.io/extensions/apps |
 | WebView2 SDK | https://www.nuget.org/packages/Microsoft.Web.WebView2 |
 | QCefView（可选后端） | https://github.com/CefView/QCefView |
-| 本分支审计报告 | docs/MCP_2026-07-28_规范对照审计.md |
-| API 参考 | docs/API_REFERENCE.md |
+| 本分支审计报告 | [docs/mcp_2026-07-28_规范对照审计.md](mcp_2026-07-28_规范对照审计.md) |
+| API 参考 | [docs/API_REFERENCE.md](API_REFERENCE.md) |
+| 缺口清单 | [docs/缺失功能清单.md](缺失功能清单.md) |

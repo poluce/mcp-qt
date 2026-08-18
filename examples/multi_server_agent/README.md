@@ -23,6 +23,9 @@
 5. **MCP Apps 交互界面渲染**
    工具返回 MCP Apps（`text/html;profile=mcp-app`）内容时，界面右侧分屏内嵌 **WebView2** 渲染交互 UI（AppBridge 双向消息：App 可回调工具、宿主可推送数据）。Agent 调用到 MCP Apps 工具即可看到仪表盘/图表等交互界面，而非纯文本。
 
+6. **多 Agent 注册与对账**
+   `AgentRegistry` 记录 agent → 服务器集合；`AgentReconciler` 按并集启用 `McpHost` 上的服务器（重叠自然去重）。设计说明见 [`docs/multi_agent_mcp_设计草案.md`](../../docs/multi_agent_mcp_设计草案.md)。
+
 ## 🚀 内置 MCP 服务器列表
 
 目前的 `examples_config.json` 默认集成了以下业界标杆级的 MCP 服务器：

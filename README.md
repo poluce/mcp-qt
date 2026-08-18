@@ -152,8 +152,8 @@ cmake --build build
 
 # 运行测试
 cd build && ctest
-# 或直接运行单个测试
-./build/test/tests_qt testToolsModel
+# 主测试产物在 build/build_test/（见 test/CMakeLists.txt）
+./build/build_test/tests_qt
 
 # 主示例：多服务器 Agent + MCP Apps 渲染（WebView2）
 ./build/examples/multi_server_agent/multi_server_agent
@@ -256,7 +256,7 @@ mcp-qt/
 - **无状态 HTTP**：免握手、每请求 `_meta` 自包含、Header 路由（`Mcp-Method`/`Mcp-Name`）
 - **MRTR 多轮交互**：`inputRequired` 信号 + requestState 原样回显 + 自动重试
 - **`server/discover`**：异步/同步能力发现
-- **CacheableResult**：`listToolsWithCache` 等暴露 `ttlMs`/`cacheScope`
+- **CacheableResult**：Qt 层 `listTools(..., McpCacheHint*)`（session 层为 `listToolsWithCache`）暴露 `ttlMs`/`cacheScope`
 - **`subscriptions/listen`**：长连接变更通知（`listenSubscriptions` / `setSubscriptionListener`）
 - **OAuth 硬化**：RFC 9207 `iss` 校验、DCR `application_type`、CIMD URL-based client_id、issuer 凭据绑定、scope 合并
 
