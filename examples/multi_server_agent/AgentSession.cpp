@@ -13,6 +13,7 @@ AgentSession::AgentSession(mcp_qt::McpHost* host,
     : QObject(parent)
     , m_host(host)
     , m_llmBackend(llmBackend)
+    , m_view(std::make_unique<mcp_qt::McpServerView>(host, this))
 {
     m_executor = new mcp_agent::LlmAgentExecutor(m_llmBackend, this);
 
@@ -62,25 +63,10 @@ AgentSession::AgentSession(mcp_qt::McpHost* host,
 }
 
 // ============================================================================
-// setServerFilter(): 限定该 agent 可见的服务器（serverName_ 前缀白名单）
+// setServerFilter(): 限定该 agent 可见的服务器（McpServerView 视图裁剪，issue #9）
 // ============================================================================
 void AgentSession::setServerFilter(const QStringList& servers) {
-    m_serverFilter = servers;
-}
-
-// 从全量工具中筛出属于指定服务器集合的工具（按 "serverName_" 前缀匹配）。
-static QJsonArray filterToolsByServers(const QJsonArray& allTools, const QStringList& servers) {
-    if (servers.isEmpty()) return allTools;
-    QJsonArray filtered;
-    for (const auto& t : allTools) {
-        const QString name = t.toObject().value(QStringLiteral("function")).toObject().value(QStringLiteral("name")).toString();
-        bool keep = false;
-        for (const QString& s : servers) {
-            if (name.startsWith(s + QStringLiteral("_"))) { keep = true; break; }
-        }
-        if (keep) filtered.append(t);
-    }
-    return filtered;
+    m_view->setVisibleServers(servers);
 }
 
 // ============================================================================
@@ -107,7 +93,7 @@ void AgentSession::runTask(const QString& task) {
 
     qInfo().noquote() << "[AgentSession] runTask:" << task;
 
-    QJsonArray tools = filterToolsByServers(m_host->exportAllToolsToLlm(), m_serverFilter);
+    QJsonArray tools = m_view->exportAllToolsToLlmFormat();
 
     if (tools.isEmpty()) {
         finishWithError("tool/discovery", "No tools available", "Ensure MCP servers are online");
@@ -131,7 +117,7 @@ void AgentSession::continueConversation(const QString& task, const QString&) {
     m_finished = false;
     if (m_watchdogTimer) m_watchdogTimer->start(m_timeoutMs * 6);
 
-    QJsonArray tools = filterToolsByServers(m_host->exportAllToolsToLlm(), m_serverFilter);
+    QJsonArray tools = m_view->exportAllToolsToLlmFormat();
     QPointer<AgentSession> safeThis(this);
     m_executor->continueRun(task, tools, [safeThis](bool ok, QString answer) {
         if (!safeThis) return;

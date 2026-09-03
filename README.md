@@ -300,6 +300,20 @@ host.callToolAsync("github_search_code", {{"q", "mcp-qt"}}, [](McpResult r) {
 });
 ```
 
+**按会话/Agent 过滤视图（`McpServerView`）**：底层连接全局共享（同一服务器只连一次），
+每个会话用轻量视图裁剪可见服务器，实现"每个 agent 一套独立 MCP 环境"：
+
+```cpp
+// 每个 agent 一个视图，只声明它要的服务器
+McpServerView view(&host);
+view.setVisibleServers({"github", "filesystem"});   // 空 = 全部可见
+QJsonArray agentTools = view.exportAllToolsToLlmFormat();  // 只含可见服务器工具
+QJsonArray agentPrompts = view.exportAllPrompts();         // 只含可见服务器提示词
+QJsonArray agentResources = view.exportAllResources();     // 只含可见服务器资源
+// 切换 agent = 换可见列表，连接不重建
+view.setVisibleServers({"search"});
+```
+
 ### 类型化工具结果
 
 无缝解析复合型工具返回，自动解码 Base64 图片，**始终保留原始 JSON**：

@@ -55,6 +55,7 @@ public:
     McpToolRouter* toolRouter() const { return m_toolRouter; }
     McpPromptRouter* promptRouter() const { return m_promptRouter; }
     McpResourceRouter* resourceRouter() const { return m_resourceRouter; }
+    McpServerManager* manager() const { return m_manager; }
 
     // ================= 4. Diagnostics =================
     QString getDiagnosticReport() const;
