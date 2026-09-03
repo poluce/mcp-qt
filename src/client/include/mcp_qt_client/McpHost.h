@@ -24,7 +24,6 @@ public:
     bool loadConfigFromFile(const QString& configFilePath);
     bool loadConfigFromJson(const QJsonObject& jsonObj);
     void clearConfig();
-    void addServerConfig(const McpServerConfig& config);
     
     // Starts enabled servers asynchronously. Emits hostReady when done or timeout occurs.
     void start(int timeoutMs = 30000); 
@@ -36,10 +35,20 @@ public:
     bool reloadConfigAndRestart(int timeoutMs = 30000);
 
     // ================= 2. Server Management =================
+    /// 已注册（已连接）的服务器名——与 McpServerManager::serverNames() 语义一致。
+    /// 注意：未启用/未 start 的服务器不在此列；如需配置列表（含未启用）用 configuredServerNames()。
     QStringList serverNames() const;
+    /// 配置中声明的全部服务器名（含未启用的），与 serverNames() 的"已注册"语义区分。
+    QStringList configuredServerNames() const;
     void setServerEnabled(const QString& serverName, bool enabled, bool persist = true);
     void removeServerConfig(const QString& serverName, bool persist = true);
+    /// 登记/更新配置（同名覆盖去重）。仅登记，不启动、不持久化——start() 时才连接。
+    /// 需要"即改即生效 + 持久化"用 addOrUpdateServerConfig()。
+    void addServerConfig(const McpServerConfig& config);
+    /// 更新配置并自动重启该服务器（stop + start），可选持久化到配置文件。
     void addOrUpdateServerConfig(const McpServerConfig& config, bool persist = true);
+    /// 重启指定服务器（从已加载配置重新拉起）。
+    void restartServer(const QString& serverName);
     bool isServerEnabled(const QString& serverName) const;
     
     McpServerState serverState(const QString& serverName) const;

@@ -93,6 +93,15 @@ bool McpHost::loadConfigs(const QList<McpServerConfig>& configs) {
 }
 
 void McpHost::addServerConfig(const McpServerConfig& config) {
+    // 同名覆盖去重：与 addOrUpdateServerConfig 的"更新"语义对齐；
+    // 差异仅在"不启动、不持久化"（start() 时才连接）。
+    for (int i = 0; i < m_loadedConfigs.size(); ++i) {
+        if (m_loadedConfigs[i].serverName == config.serverName) {
+            m_loadedConfigs[i] = config;
+            m_enabledServers.insert(config.serverName, !config.disabled);
+            return;
+        }
+    }
     m_loadedConfigs.append(config);
     m_enabledServers.insert(config.serverName, !config.disabled);
 }
@@ -158,11 +167,29 @@ bool McpHost::reloadConfigAndRestart(int timeoutMs) {
 }
 
 QStringList McpHost::serverNames() const {
+    // 语义统一为"已注册（已连接）"——与 McpServerManager::serverNames() 一致
+    return m_manager->serverNames();
+}
+
+QStringList McpHost::configuredServerNames() const {
     QStringList names;
     for (const auto& cfg : m_loadedConfigs) {
         names.append(cfg.serverName);
     }
     return names;
+}
+
+void McpHost::restartServer(const QString& serverName) {
+    for (const auto& cfg : m_loadedConfigs) {
+        if (cfg.serverName == serverName) {
+            m_manager->stopServer(serverName);
+            if (m_enabledServers.value(serverName, false)) {
+                m_manager->startServer(cfg);
+            }
+            return;
+        }
+    }
+    m_reporter->addError("Server", QString("restartServer: no config for %1").arg(serverName));
 }
 
 void McpHost::setServerEnabled(const QString& serverName, bool enabled, bool persist) {

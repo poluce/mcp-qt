@@ -773,7 +773,8 @@ void AgentMainWindow::updateAllServerList() {
     if (!m_host) return;
 
     const QStringList referenced = m_registry ? m_registry->allServers() : QStringList();
-    for (const QString& name : m_host->serverNames()) {
+    // 显示全部配置的服务器（含未启用），未引用/未连接状态分别标记
+    for (const QString& name : m_host->configuredServerNames()) {
         // 未被任何 agent 引用 → 对账器预期禁用，标灰提示
         if (!referenced.contains(name)) {
             auto* item = new QListWidgetItem(QString("⚪ %1 (未引用)").arg(name));
