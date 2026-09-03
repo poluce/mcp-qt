@@ -28,6 +28,8 @@ add_library(mcp_qt_client STATIC
     src/McpHost.cpp
     include/mcp_qt_client/McpServerView.h
     src/McpServerView.cpp
+    include/mcp_qt_client/McpLogger.h
+    src/McpLogger.cpp
     include/mcp_qt_client/McpDiagnosticReporter.h
     src/McpDiagnosticReporter.cpp
     include/mcp_qt_client/es256jwt.h

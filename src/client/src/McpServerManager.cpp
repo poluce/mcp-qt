@@ -1,4 +1,5 @@
 #include <mcp_qt_client/McpServerManager.h>
+#include <mcp_qt_client/McpLogger.h>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -96,7 +97,8 @@ bool McpServerManager::startServer(const McpServerConfig& rawCfg) {
         auto clientPtr = builder.buildAndConnectAsync();
         if (clientPtr) registerClient(cfg.serverName, clientPtr);
     } else {
-        qWarning() << "Server config for" << cfg.serverName << "does not contain url or command";
+        McpLogger::warning(QStringLiteral("Server config for %1 does not contain url or command").arg(cfg.serverName),
+                           QStringLiteral("McpServerManager"));
         return false;
     }
     return true;
@@ -215,7 +217,8 @@ void McpServerManager::updateServerState(const QString& serverName, McpServerSta
     if (m_serverStates.value(serverName) != state) {
         // Error 状态变化必须留痕（连接失败/预热失败路径），方便定位故障服务器（issue #8）
         if (state == McpServerState::Error) {
-            qWarning().noquote() << "[McpServerManager] Server" << serverName << "entered error state";
+            McpLogger::warning(QStringLiteral("Server %1 entered error state").arg(serverName),
+                               QStringLiteral("McpServerManager"));
         }
         m_serverStates[serverName] = state;
         emit clientStateChanged(serverName, state);
@@ -256,8 +259,9 @@ void McpServerManager::setupClientSignals(const QString& serverName, const std::
     });
     connect(client.get(), &McpQtClient::errorOccurred, this, [this, serverName](const mcp_qt::McpError& error) {
         // 连接失败必须留痕：只 emit 信号会导致宿主侧"0 个工具"却不知失败原因（issue #8）
-        qWarning().noquote() << "[McpServerManager] MCP client error for" << serverName
-                             << ":" << error.message;
+        // 统一走 McpLogger（全局级别控制 + 文件落盘）
+        McpLogger::warning(QStringLiteral("MCP client error for %1: %2").arg(serverName, error.message),
+                           QStringLiteral("McpServerManager"));
         updateServerState(serverName, McpServerState::Error);
         emit clientErrorOccurred(serverName, error);
         if (isAllToolsReady()) {
@@ -296,7 +300,8 @@ void McpServerManager::startHeartbeat(int intervalMs) {
                 // 异步 ping，失败时 client 的 auto-reconnect 机制会自动触发
                 c->pingAsync([name](bool success, const QString& error) {
                     if (!success) {
-                        qWarning().noquote() << "[McpServerManager] Heartbeat ping failed for" << name << ":" << error;
+                        McpLogger::warning(QStringLiteral("Heartbeat ping failed for %1: %2").arg(name, error),
+                                           QStringLiteral("McpServerManager"));
                     }
                 });
             }

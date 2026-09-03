@@ -314,6 +314,28 @@ QJsonArray agentResources = view.exportAllResources();     // 只含可见服务
 view.setVisibleServers({"search"});
 ```
 
+### 统一日志（McpLogger）
+
+全局日志级别控制 + 文件落盘，解决"各模块各自 qDebug 无开关、日志不落盘"两个可观测性缺口：
+
+```cpp
+#include <mcp_qt_client/McpLogger.h>
+
+// 全局级别开关（Debug/Info/Warning/Error，低于该级别的日志被丢弃）
+mcp_qt::McpLogger::setGlobalLevel(mcp_qt::McpLogLevel::Info);
+
+// 文件落盘（追加模式，线程安全）
+mcp_qt::McpLogger::setLogFile("mcp-qt.log");
+
+// 统一入口（带模块名，输出含时间戳 + 级别 + 模块）
+mcp_qt::McpLogger::warning("MCP client error for github: connection refused", "McpServerManager");
+// 或便捷宏
+MCP_LOG_INFO_MOD("McpHost", "Starting MCP Host...");
+```
+
+日志行格式：`2026-09-03 14:30:00.123 [Warning] [McpServerManager] MCP client error for ...`。
+`McpServerManager` 的连接错误/心跳失败/状态变化已接入；控制台输出可用 `setConsoleEnabled(false)` 关闭（仅写文件）。
+
 ### 类型化工具结果
 
 无缝解析复合型工具返回，自动解码 Base64 图片，**始终保留原始 JSON**：

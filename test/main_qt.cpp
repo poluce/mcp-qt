@@ -45,6 +45,8 @@ void test_qt_tasks_sync_apis();
 void test_qt_server_view_filtering();
 void test_qt_server_view_multi_view_isolation();
 void test_qt_server_view_schema_export();
+void test_qt_logger_level_filtering();
+void test_qt_logger_file_output();
 void test_qt_mcp_app_bridge_initialize();
 void test_qt_mcp_app_bridge_tools_list_filter();
 void test_qt_mcp_app_bridge_tools_call_permission_denied();
@@ -118,6 +120,8 @@ int main(int argc, char* argv[]) {
     TM_RUN_TEST(test_qt_server_view_filtering);
     TM_RUN_TEST(test_qt_server_view_multi_view_isolation);
     TM_RUN_TEST(test_qt_server_view_schema_export);
+    TM_RUN_TEST(test_qt_logger_level_filtering);
+    TM_RUN_TEST(test_qt_logger_file_output);
     TM_RUN_TEST(test_qt_mcp_app_bridge_initialize);
     TM_RUN_TEST(test_qt_mcp_app_bridge_tools_list_filter);
     TM_RUN_TEST(test_qt_mcp_app_bridge_tools_call_permission_denied);

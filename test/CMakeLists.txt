@@ -19,6 +19,7 @@ add_executable(tests_qt
     test_qt_highlevel_stateless.cpp
     test_qt_tasks.cpp
     test_qt_server_view.cpp
+    test_qt_logger.cpp
     test_qt_mcp_app_bridge.cpp
     test_mcp_app_content_adapter.cpp
     test_multi_agent_registry.cpp
