@@ -414,8 +414,12 @@ void McpClientSession::handleResponse(const json& responseJson) {
         json result = responseJson.contains("result") ? responseJson["result"] : json::object();
         json error = responseJson.contains("error") ? responseJson["error"] : json::object();
 
-        // MCP 2026-07-28 MRTR: 拦截 resultType/status: "input_required" 挂起状态
-        bool isInputRequired = result.is_object() && 
+        // MCP 2026-07-28 MRTR: 拦截 resultType/status: "input_required" 挂起状态。
+        // 注意：tasks/get 的 DetailedTask 也携带 status: "input_required"（SEP-2663），
+        // 但其 resultType 为 "complete"，属任务状态而非 MRTR 挂起——必须按请求方法排除
+        // tasks 家族，否则任务轮询会被误判为 MRTR 并报 -32901。
+        bool isTaskMethod = reqMethod.rfind("tasks/", 0) == 0;
+        bool isInputRequired = result.is_object() && !isTaskMethod &&
             ((result.contains("status") && result["status"] == "input_required") ||
              (result.contains("resultType") && result["resultType"] == "input_required"));
 
@@ -471,9 +475,10 @@ void McpClientSession::handleResponse(const json& responseJson) {
 
         // MCP 2026-07-28 通用 resultType 语义（SEP-2575）：
         //   所有结果 MUST 携带 resultType；缺省视为 complete；未知值视为无效。
+        //   "task"（SEP-2663 Tasks 扩展）为合法值：tools/call 可返回 CreateTaskResult。
         if (result.is_object() && result.contains("resultType") && result["resultType"].is_string()) {
             const std::string rt = result["resultType"].get<std::string>();
-            if (!rt.empty() && rt != kResultTypeComplete && rt != kResultTypeInputRequired) {
+            if (!rt.empty() && rt != kResultTypeComplete && rt != kResultTypeInputRequired && rt != kResultTypeTask) {
                 log(LogLevel::Warning, "Unknown resultType '" + rt + "' in response for id=" + std::to_string(id));
                 cb(json::object(), {{"code", kErrorUnknownResultType},
                                     {"message", "Unknown resultType: " + rt}});
@@ -1323,6 +1328,84 @@ void McpClientSession::resendMrtrRequest(const std::string& method, json params,
         + " with top-level inputResponses" + (requestState.empty() ? "" : " and requestState"));
     // 新的 JSON-RPC id 由 sendRequest 自动分配（MUST differ from the initial request）
     sendRequest(method, params, std::move(callback));
+}
+
+// ==========================================
+// Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）
+// ==========================================
+
+void McpClientSession::getTask(const std::string& taskId, std::function<void(const McpTask& task, const json& error)> callback) {
+    json params = {{"taskId", taskId}};
+    sendRequest("tasks/get", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback(McpTask{}, error);
+            return;
+        }
+        callback(McpTask::fromJson(result), json::object());
+    });
+}
+
+void McpClientSession::updateTask(const std::string& taskId, const json& inputResponses,
+                                  std::function<void(bool success, const json& error)> callback) {
+    json params = {{"taskId", taskId}, {"inputResponses", inputResponses}};
+    sendRequest("tasks/update", params, [callback](const json& result, const json& error) {
+        (void)result;  // ack-only：成功时为空结果
+        callback(error.empty(), error);
+    });
+}
+
+void McpClientSession::cancelTask(const std::string& taskId, std::function<void(bool success, const json& error)> callback) {
+    json params = {{"taskId", taskId}};
+    sendRequest("tasks/cancel", params, [callback](const json& result, const json& error) {
+        (void)result;  // ack-only：成功时为空结果
+        callback(error.empty(), error);
+    });
+}
+
+McpTask McpClientSession::getTaskSync(const std::string& taskId, std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<McpTask, json>>>();
+    auto fut = pr->get_future();
+    getTask(taskId, [pr](const McpTask& task, const json& error) {
+        pr->set_value({task, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous getTask timed out"}};
+    return McpTask{};
+}
+
+bool McpClientSession::updateTaskSync(const std::string& taskId, const json& inputResponses,
+                                      std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
+    auto fut = pr->get_future();
+    updateTask(taskId, inputResponses, [pr](bool success, const json& error) {
+        pr->set_value({success, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous updateTask timed out"}};
+    return false;
+}
+
+bool McpClientSession::cancelTaskSync(const std::string& taskId, std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
+    auto fut = pr->get_future();
+    cancelTask(taskId, [pr](bool success, const json& error) {
+        pr->set_value({success, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous cancelTask timed out"}};
+    return false;
 }
 
 void McpClientSession::notifyRootsListChanged() {

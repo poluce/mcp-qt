@@ -14,6 +14,7 @@
 #include "McpTool.h"
 #include "McpResource.h"
 #include "McpPrompt.h"
+#include "McpTask.h"
 #include "McpTrafficEvent.h"
 
 namespace mcp {
@@ -86,6 +87,9 @@ public:
     // 缺省视为 complete；未知值视为无效（回调 -32998）。
     static constexpr const char* kResultTypeComplete = "complete";
     static constexpr const char* kResultTypeInputRequired = "input_required";
+    // Tasks 扩展（SEP-2663）：tools/call 等受支持请求可返回 CreateTaskResult
+    // （resultType: "task"）代替标准结果，表示异步执行。
+    static constexpr const char* kResultTypeTask = "task";
 
     // 2026-07-28 错误码分区（SEP-2575）：
     //   -32000..-32019 : schema 保留区（协议/服务器错误）
@@ -368,6 +372,62 @@ public:
      *        When the server in stateless mode requires additional user input, the handler is triggered.
      */
     void setMrtrHandler(MrtrInputHandler handler);
+
+    // ==========================================
+    // Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）
+    // ==========================================
+
+    /**
+     * @brief 查询任务状态（tasks/get）。
+     *        服务器 MUST 返回 DetailedTask（resultType: "complete"）：
+     *        working / input_required(+inputRequests) / completed(+result) /
+     *        failed(+error) / cancelled。
+     * @param taskId  服务器在 CreateTaskResult 中返回的任务标识。
+     * @param callback (task, error)；error 非空表示协议错误（如 -32602 任务不存在）。
+     */
+    void getTask(const std::string& taskId, std::function<void(const McpTask& task, const json& error)> callback);
+
+    /**
+     * @brief 提交任务输入（tasks/update）。
+     *        当任务处于 input_required 时，客户端通过 inputResponses 满足
+     *        tasks/get 响应中 inputRequests 的待处理请求（key -> 结果）。
+     *        服务器以空结果确认（ack-only，最终一致）。
+     * @param taskId         任务标识。
+     * @param inputResponses InputResponses map（key -> 对应结果）。
+     * @param callback       (success, error)。
+     */
+    void updateTask(const std::string& taskId, const json& inputResponses,
+                    std::function<void(bool success, const json& error)> callback);
+
+    /**
+     * @brief 取消任务（tasks/cancel）。
+     *        取消是协作式的：服务器仅确认收到意图，不保证任务真正停止；
+     *        客户端无需继续轮询等待 cancelled 状态。
+     * @param taskId    任务标识。
+     * @param callback  (success, error)。
+     */
+    void cancelTask(const std::string& taskId, std::function<void(bool success, const json& error)> callback);
+
+    /**
+     * @brief 同步查询任务状态（tasks/get）。仅限非 GUI 线程使用。
+     */
+    McpTask getTaskSync(const std::string& taskId,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                        json* errorOut = nullptr);
+
+    /**
+     * @brief 同步提交任务输入（tasks/update）。仅限非 GUI 线程使用。
+     */
+    bool updateTaskSync(const std::string& taskId, const json& inputResponses,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                        json* errorOut = nullptr);
+
+    /**
+     * @brief 同步取消任务（tasks/cancel）。仅限非 GUI 线程使用。
+     */
+    bool cancelTaskSync(const std::string& taskId,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                        json* errorOut = nullptr);
 
     /**
      * @brief Notify the server that the roots list has changed.

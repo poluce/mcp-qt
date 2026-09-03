@@ -206,6 +206,9 @@ static int _raQt(const RunnerConfig& c, bool ct) {
             if (c.context.contains("private_key_pem")) ctx["private_key_pem"] = c.context["private_key_pem"];
             if (c.context.contains("signing_algorithm")) ctx["signing_algorithm"] = c.context["signing_algorithm"];
         }
+        // 401 即服务器拒绝当前 token：先作废，避免 OAuthFlowLock 复用被拒 token
+        // （SEP-2352：AS 变更后旧 token 仍"未过期"，不复用则无法触发重新发现+重新注册）
+        oc->setCurrentToken(mcp::OAuthToken{});
         bool ok = mcp_qt::McpQtClient::runOAuthFlow(c.serverUrl, ctx, wwwAuth, oc);
         if (!ok) {
             *oauthFailed = true;

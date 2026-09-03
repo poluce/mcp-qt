@@ -61,10 +61,16 @@ private:
     QElapsedTimer m_lastHealthCheckTime;
     bool m_stopping{false};
     bool m_sseConnected{false};
+    // openSse 主动 abort 旧流时置位：旧流 finished 不再触发重连调度
+    // （否则每次替换 GET 流都会产生 500ms 重连循环）
+    bool m_intentionalAbort{false};
     std::function<std::string()> m_tokenProvider;
     std::function<bool(const std::string&)> m_authRetryHandler;
     QtHttpRequestConfig m_requestConfig;
     class QNetworkAccessManager* m_network{nullptr};
+    // POST 专用 QNAM：与 GET SSE 长连接隔离，避免 QNAM 连接池把 POST 排队在
+    // GET 连接后面（localhost/IPv6 场景实测 POST 会被卡住直到 GET 被 abort）。
+    class QNetworkAccessManager* m_postNetwork{nullptr};
     
     QNetworkReply* m_sseReply{nullptr};
     QTimer* m_reconnectTimer{nullptr};

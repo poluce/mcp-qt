@@ -93,6 +93,46 @@ struct McpQtTool {
     QJsonObject meta;  // 工具顶层 _meta（MCP Apps: ui.resourceUri / ui.visibility 等）
 };
 
+/// MCP Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）任务值类型（Qt 友好版）。
+/// 服务器可在 tools/call 响应中返回 CreateTaskResult（resultType: "task"）表示异步执行；
+/// 客户端通过 tasks/get 轮询、tasks/update 提交输入、tasks/cancel 取消。
+struct McpQtTask {
+    QString taskId;              // 服务器生成的稳定任务标识
+    QString status;              // working / input_required / completed / cancelled / failed
+    QString statusMessage;       // 可选状态描述
+    QString createdAt;           // ISO 8601 创建时间
+    QString lastUpdatedAt;       // ISO 8601 最后更新时间
+    qint64 ttlMs{-1};            // 存活时长（毫秒）；-1 = 无限制
+    qint64 pollIntervalMs{-1};   // 建议轮询间隔（毫秒）；-1 = 未提供
+    QJsonObject inputRequests;   // status == input_required：InputRequests map
+    QJsonObject result;          // status == completed：最终结果（结构同标准结果）
+    QJsonObject error;           // status == failed：JSON-RPC 错误
+    QJsonObject raw;             // 完整原始 JSON（永不丢弃）
+
+    bool isTerminal() const {
+        return status == QStringLiteral("completed")
+            || status == QStringLiteral("cancelled")
+            || status == QStringLiteral("failed");
+    }
+    bool empty() const { return taskId.isEmpty(); }
+
+    static McpQtTask fromJson(const QJsonObject& j) {
+        McpQtTask t;
+        t.raw = j;
+        t.taskId = j.value(QStringLiteral("taskId")).toString();
+        t.status = j.value(QStringLiteral("status")).toString();
+        t.statusMessage = j.value(QStringLiteral("statusMessage")).toString();
+        t.createdAt = j.value(QStringLiteral("createdAt")).toString();
+        t.lastUpdatedAt = j.value(QStringLiteral("lastUpdatedAt")).toString();
+        t.ttlMs = j.value(QStringLiteral("ttlMs")).toDouble(-1);
+        t.pollIntervalMs = j.value(QStringLiteral("pollIntervalMs")).toDouble(-1);
+        t.inputRequests = j.value(QStringLiteral("inputRequests")).toObject();
+        t.result = j.value(QStringLiteral("result")).toObject();
+        t.error = j.value(QStringLiteral("error")).toObject();
+        return t;
+    }
+};
+
 class McpQtClient;
 class McpToolsModel;
 class McpPromptsModel;
@@ -321,6 +361,42 @@ public:
     void callToolTypedAsync(const QString& name, const QJsonObject& arguments,
                             std::function<void(McpQtToolResult)> callback,
                             int timeoutMs = 10000);
+
+    // ========== Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）==========
+
+    /// 注册 Tasks 扩展客户端能力声明：在 clientCapabilities.extensions 中声明
+    /// io.modelcontextprotocol/tasks（SEP-2133 扩展框架）。建议在连接前调用；
+    /// 连接后调用会同步推送到会话（对后续请求生效）。
+    void registerMcpTaskCapabilities();
+
+    /// 查询任务状态（tasks/get，异步）。error 非空表示协议错误（如任务不存在）。
+    void getTaskAsync(const QString& taskId, std::function<void(const McpQtTask& task, const QString& error)> callback);
+
+    /// 查询任务状态（tasks/get，同步，仅限非 GUI 线程）。
+    McpQtTask getTask(const QString& taskId, int timeoutMs = 10000);
+
+    /// 提交任务输入（tasks/update，异步）：满足 input_required 任务在 tasks/get
+    /// 响应 inputRequests 中列出的待处理请求（key -> 结果）。ack-only 确认。
+    void updateTaskAsync(const QString& taskId, const QJsonObject& inputResponses,
+                         std::function<void(bool success, const QString& error)> callback);
+
+    /// 提交任务输入（tasks/update，同步，仅限非 GUI 线程）。
+    bool updateTask(const QString& taskId, const QJsonObject& inputResponses, int timeoutMs = 10000);
+
+    /// 取消任务（tasks/cancel，异步）。取消是协作式的：服务器仅确认收到意图。
+    void cancelTaskAsync(const QString& taskId, std::function<void(bool success, const QString& error)> callback);
+
+    /// 取消任务（tasks/cancel，同步，仅限非 GUI 线程）。
+    bool cancelTask(const QString& taskId, int timeoutMs = 10000);
+
+    /// 调用工具并直接返回任务句柄（不自动轮询）。
+    /// 服务器返回 CreateTaskResult（resultType: "task"）时 task 非空；
+    /// 返回标准结果时 task.empty() 为 true 且 result 携带标准结果。
+    /// 需要任务生命周期管理（轮询/输入/取消）的应用使用此 API；
+    /// 普通 callToolAsync() 会自动透明轮询到终态。
+    void callToolTaskAsync(const QString& name, const QJsonObject& arguments,
+                           std::function<void(const McpQtTask& task, const McpResult& result, const QString& error)> callback,
+                           ProgressCallback onProgress = nullptr);
 
     // ========== 公开参数校验 API ==========
     /// 本地校验工具参数是否符合 Schema 要求
@@ -675,6 +751,16 @@ private:
 
     template <typename Initiator>
     bool runSyncWithTimeout(Initiator&& initiator, int timeoutMs);
+
+    // Tasks 扩展（SEP-2663）：透明轮询任务直到终态（异步，QTimer 驱动，尊重 pollIntervalMs）
+    void pollTaskToCompletion(const QString& taskId, int pollIntervalMs, int timeoutMs,
+                              std::function<void(const McpQtTask& task)> done);
+    // Tasks 扩展：把任务终态转换为 McpResult（透明路径用）
+    static McpResult taskToResult(const McpQtTask& task);
+    // callTool 内部实现：pollTimeoutMs > 0 时任务透明轮询受该上限约束（同步路径用）
+    void callToolAsyncImpl(const QString& name, const QJsonObject& arguments, QObject* ctx,
+                           std::function<void(McpResult)> callback, ProgressCallback onProgress,
+                           int pollTimeoutMs);
 };
 
 } // namespace mcp_qt

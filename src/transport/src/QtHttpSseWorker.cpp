@@ -1,5 +1,6 @@
 #include "QtHttpSseWorker.h"
 
+#include <cstdio>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -37,11 +38,14 @@ QtHttpSseWorker::QtHttpSseWorker(QString baseUrl, QObject* parent)
     m_healthCheckTimer->setInterval(50);
     connect(m_healthCheckTimer, &QTimer::timeout, this, [this]() {
         if (!m_sseConnected || m_stopping) return;
-        // 服务器发过 retry: 字段（期望快速重连）→ 用快阈值探测停滞；否则保守 5000ms。
-        // 冷却期（5s）限制重连风暴，故快阈值只加快首次探测，不放大稳态重连频率。
-        const qint64 stallMs = m_retryFieldReceived ? 100 : 5000;
+        // 健康检查只负责探测"真死连接"（服务器长时间无数据且无关闭信号），
+        // 用保守阈值 5000ms。重连时序由关闭事件驱动（GET finished /
+        // POST SSE 响应流 finished → scheduleReconnect 按 retry 字段延迟），
+        // 健康检查不得抢先启动重连定时器——否则会在服务器正常关闭前
+        // （如 tools/call 处理期间 GET 流静默）提前重连，违反 SEP-1699 时序。
+        const qint64 stallMs = 5000;
         if (m_lastDataTime.isValid() && m_lastDataTime.elapsed() > stallMs) {
-            // 连接停滞检测：超过阈值未恢复数据，则主动断开触发重连。
+                        // 连接停滞检测：超过阈值未恢复数据，则主动断开触发重连。
             // 先直接启动重连定时器（按 retry 字段延迟），再 abort 清理死连接——
             // 避免等 abort→finished 信号往返额外吃掉时间（SSE retry 时序敏感，SEP-1699）。
             // 冷却期（5s）限制重连风暴，快阈值只加快首次探测。
@@ -57,7 +61,6 @@ QtHttpSseWorker::QtHttpSseWorker(QString baseUrl, QObject* parent)
 
     m_parser.setRetryCallback([this](int retryMs) {
         m_retryMs = retryMs;
-        // 服务器显式发 retry: 字段（SEP-1699）→ 期望快速重连，健康检查改用快阈值
         m_retryFieldReceived = true;
     });
 
@@ -89,6 +92,13 @@ void QtHttpSseWorker::startStream() {
         m_network = new QNetworkAccessManager(this);
         if (m_requestConfig.proxy) {
             m_network->setProxy(*m_requestConfig.proxy);
+        }
+    }
+    if (!m_postNetwork) {
+        // POST 独立 QNAM：避免与 GET SSE 长连接共享连接池导致 POST 排队阻塞
+        m_postNetwork = new QNetworkAccessManager(this);
+        if (m_requestConfig.proxy) {
+            m_postNetwork->setProxy(*m_requestConfig.proxy);
         }
     }
     openSse();
@@ -129,6 +139,8 @@ void QtHttpSseWorker::openSse() {
         return;
     }
     if (m_sseReply) {
+        // 主动替换旧流：标记意图，旧流 finished 不再触发重连（防 500ms 重连循环）
+        m_intentionalAbort = true;
         m_sseReply->abort();
         m_sseReply->deleteLater();
         m_sseReply = nullptr;
@@ -201,7 +213,13 @@ void QtHttpSseWorker::handleSseReadyRead() {
 }
 
 void QtHttpSseWorker::handleSseFinished() {
-    if (m_stopping || !m_sseConnected) return;
+    if (m_stopping) return;
+    if (m_intentionalAbort) {
+        // openSse 主动 abort（替换旧流）：不触发重连、不改连接状态
+        m_intentionalAbort = false;
+        return;
+    }
+    if (!m_sseConnected) return;
     m_sseConnected = false;
     m_healthCheckTimer->stop();
     scheduleReconnect();
@@ -256,7 +274,7 @@ bool QtHttpSseWorker::postMessage(const QString& payload, int retryCount) {
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Accept", "application/json, text/event-stream");
 
-    QNetworkReply* reply = m_network->post(request, payload.toUtf8());
+    QNetworkReply* reply = m_postNetwork->post(request, payload.toUtf8());
     connect(reply, &QNetworkReply::finished, this, [this, reply, payload, retryCount]() {
         const auto sessionHeader = reply->rawHeader("MCP-Session-Id");
         bool justGotSession = !sessionHeader.isEmpty() && m_sessionId.isEmpty();
@@ -298,6 +316,7 @@ bool QtHttpSseWorker::postMessage(const QString& payload, int retryCount) {
             QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
             if (contentType.contains("text/event-stream", Qt::CaseInsensitive)) {
                 parseSseInlineBody(body);
+                scheduleReconnect();
             } else {
                 emit messageReceived(QString::fromUtf8(body));
             }

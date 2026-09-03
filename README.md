@@ -22,6 +22,8 @@
 | OAuth 授权（iss 校验 / scope / token-endpoint / CIMD / 迁移） | 25 | ✅ 全过 |
 | **总计** | **32** | **32/32 全绿，0 失败 0 警告** |
 
+**全量 `--suite all`（2026-09-03 实测）**：43 个客户端场景 **450 passed / 14 failed / 0 warnings**，全部失败均在 `conformance_runner_qt/conformance-baseline.yml` 预期基线内（C2 EMA、C3 DPoP、C4 WIF、旧版 OAuth 端点回退——见 `docs/缺失功能清单.md`）。sse-retry 与 auth/authorization-server-migration 已修复全绿。
+
 **新增官方 2026-07-28 能力**：
 
 | 能力 | 说明 |

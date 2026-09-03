@@ -213,6 +213,10 @@ void McpServerManager::closeAll(int timeoutMs) {
 
 void McpServerManager::updateServerState(const QString& serverName, McpServerState state) {
     if (m_serverStates.value(serverName) != state) {
+        // Error 状态变化必须留痕（连接失败/预热失败路径），方便定位故障服务器（issue #8）
+        if (state == McpServerState::Error) {
+            qWarning().noquote() << "[McpServerManager] Server" << serverName << "entered error state";
+        }
         m_serverStates[serverName] = state;
         emit clientStateChanged(serverName, state);
     }
@@ -251,6 +255,9 @@ void McpServerManager::setupClientSignals(const QString& serverName, const std::
         emit clientDisconnected(serverName);
     });
     connect(client.get(), &McpQtClient::errorOccurred, this, [this, serverName](const mcp_qt::McpError& error) {
+        // 连接失败必须留痕：只 emit 信号会导致宿主侧"0 个工具"却不知失败原因（issue #8）
+        qWarning().noquote() << "[McpServerManager] MCP client error for" << serverName
+                             << ":" << error.message;
         updateServerState(serverName, McpServerState::Error);
         emit clientErrorOccurred(serverName, error);
         if (isAllToolsReady()) {

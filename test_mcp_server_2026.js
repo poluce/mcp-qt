@@ -68,6 +68,16 @@ const ALL_TOOLS = [
       },
       required: ['target']
     }
+  },
+  {
+    name: 'long_task',
+    description: 'Tasks 扩展演示（SEP-2663）：返回 CreateTaskResult 异步执行，约 300ms 后完成',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: '任务完成后回显的消息' }
+      }
+    }
   }
 ];
 
@@ -97,6 +107,41 @@ const ALL_PROMPTS = [
 ];
 
 // ---------- JSON-RPC helpers ----------
+
+// Tasks 扩展（SEP-2663）任务存储：taskId -> task 状态对象
+const TASK_STORE = new Map();
+let taskSeq = 0;
+
+function createTask(seed) {
+  const taskId = `mock-task-${++taskSeq}`;
+  const now = new Date().toISOString();
+  const task = {
+    taskId,
+    status: 'working',
+    statusMessage: 'The operation is now in progress.',
+    createdAt: now,
+    lastUpdatedAt: now,
+    ttlMs: 60000,
+    pollIntervalMs: 50,
+    ...seed
+  };
+  TASK_STORE.set(taskId, task);
+  return task;
+}
+
+function taskResponse(task) {
+  // tasks/get 响应：resultType MUST 为 complete（标准结果形态）
+  const t = { resultType: 'complete', ...task };
+  delete t._timer;
+  return t;
+}
+
+function createTaskResult(task) {
+  // CreateTaskResult（tools/call 响应）：resultType MUST 为 "task"（SEP-2663 判别器）
+  const t = { resultType: 'task', ...task };
+  delete t._timer;
+  return t;
+}
 
 function resultResponse(id, result) {
   return { jsonrpc: '2.0', id, result };
@@ -383,7 +428,67 @@ function processMcpRequest(body, headers) {
         };
       }
 
+      if (toolName === 'long_task') {
+        // Tasks 扩展（SEP-2663）：返回 CreateTaskResult（resultType: "task"），
+        // 任务约 300ms 后异步完成；客户端通过 tasks/get 轮询。
+        const message = (args && args.message) || 'long task done';
+        const task = createTask({});
+        setTimeout(() => {
+          const t = TASK_STORE.get(task.taskId);
+          if (!t || t.status === 'cancelled') return;
+          t.status = 'completed';
+          t.statusMessage = 'Operation completed successfully.';
+          t.lastUpdatedAt = new Date().toISOString();
+          t.result = {
+            content: [{ type: 'text', text: message }],
+            isError: false
+          };
+        }, 300);
+        return {
+          handled: true, status: 200,
+          response: resultResponse(id, createTaskResult(task))
+        };
+      }
+
       return { handled: true, status: 400, response: errorResponse(id, -32601, `Tool not found: ${toolName}`) };
+    }
+
+    case 'tasks/get': {
+      const taskId = params ? params.taskId : undefined;
+      const task = TASK_STORE.get(taskId);
+      if (!task) {
+        return { handled: true, status: 400, response: errorResponse(id, -32602, `Failed to retrieve task: Task not found`) };
+      }
+      return { handled: true, status: 200, response: resultResponse(id, taskResponse(task)) };
+    }
+
+    case 'tasks/update': {
+      const taskId = params ? params.taskId : undefined;
+      const task = TASK_STORE.get(taskId);
+      if (!task) {
+        return { handled: true, status: 400, response: errorResponse(id, -32602, `Failed to update task: Task not found`) };
+      }
+      // ack-only 确认（最终一致）：接受 inputResponses 后任务回到 working
+      if (params && params.inputResponses && task.status === 'input_required') {
+        task.status = 'working';
+        task.statusMessage = 'Input received, resuming.';
+        task.lastUpdatedAt = new Date().toISOString();
+        delete task.inputRequests;
+      }
+      return { handled: true, status: 200, response: resultResponse(id, complete({})) };
+    }
+
+    case 'tasks/cancel': {
+      const taskId = params ? params.taskId : undefined;
+      const task = TASK_STORE.get(taskId);
+      if (!task) {
+        return { handled: true, status: 400, response: errorResponse(id, -32602, `Failed to cancel task: Task not found`) };
+      }
+      // 协作式取消：仅确认收到意图；任务终态由 worker 决定
+      task.status = 'cancelled';
+      task.statusMessage = 'Task cancelled by client.';
+      task.lastUpdatedAt = new Date().toISOString();
+      return { handled: true, status: 200, response: resultResponse(id, complete({})) };
     }
 
     case 'resources/list': {

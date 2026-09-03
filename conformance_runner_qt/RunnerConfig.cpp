@@ -20,6 +20,15 @@ bool parseRunnerConfig(
             cfg.protocolVersion = argv[++i];
         } else if (arg == "--stateless" || arg == "-stateless") {
             cfg.protocolVersion = "2026-07-28";
+        } else if ((arg == "--scenario" || arg == "-scenario") && i + 1 < argc) {
+            // argv 场景名（WSL 互操作不传递 WSL 侧 env 给 Windows 进程，
+            // 由 run_conformance_wsl.sh 包装脚本把 MCP_CONFORMANCE_SCENARIO 转成 argv）
+            cfg.scenario = argv[++i];
+        } else if ((arg == "--context" || arg == "-context") && i + 1 < argc) {
+            cfg.context = nlohmann::json::parse(argv[++i], nullptr, false);
+            if (cfg.context.is_discarded()) {
+                cfg.context = nlohmann::json::object();
+            }
         }
     }
 
@@ -30,8 +39,11 @@ bool parseRunnerConfig(
         }
     }
 
-    cfg.scenario = scenarioEnv;
-    if (!contextEnv.empty()) {
+    // 场景名优先级：argv（--scenario）> env（MCP_CONFORMANCE_SCENARIO）
+    if (cfg.scenario.empty()) {
+        cfg.scenario = scenarioEnv;
+    }
+    if (cfg.context.is_null() && !contextEnv.empty()) {
         cfg.context = nlohmann::json::parse(contextEnv, nullptr, false);
         if (cfg.context.is_discarded()) {
             cfg.context = nlohmann::json::object();
