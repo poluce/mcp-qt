@@ -336,6 +336,16 @@ MCP_LOG_INFO_MOD("McpHost", "Starting MCP Host...");
 日志行格式：`2026-09-03 14:30:00.123 [Warning] [McpServerManager] MCP client error for ...`。
 `McpServerManager` 的连接错误/心跳失败/状态变化已接入；控制台输出可用 `setConsoleEnabled(false)` 关闭（仅写文件）。
 
+**日志配置建议**：
+
+| 环境 | 推荐配置 |
+|---|---|
+| 开发调试 | `setGlobalLevel(Debug)` + 控制台默认开（不落盘，避免文件噪音） |
+| 生产 | `setGlobalLevel(Warning)` + `setLogFile(日志目录/mcp-qt.log)` + `setConsoleEnabled(false)`（只落盘，避免刷屏） |
+| 问题排查 | 临时 `setGlobalLevel(Debug)` + 保留文件输出，配合流量追踪（`setTrafficLogger`）定位协议层问题 |
+
+注意：文件输出是**显式开启**的——不调用 `setLogFile` 不会产生任何日志文件；路径完全由调用方指定。
+
 ### 类型化工具结果
 
 无缝解析复合型工具返回，自动解码 Base64 图片，**始终保留原始 JSON**：
