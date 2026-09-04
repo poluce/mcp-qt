@@ -85,6 +85,10 @@ private:
     static QString interpolateEnv(const QString& value, const QProcessEnvironment& env);
     static void configureBuilder(McpQtClientBuilder& builder, const McpServerConfig& cfg);
     void processHttpServerConfig(const McpServerConfig& cfg);
+    /// 协议自动探测：protocolVersion 未显式指定时，POST server/discover(2026-07-28)
+    /// 试探服务器——支持则用无状态模式，否则回退旧协议(2025-11-25)。
+    void probeProtocolVersion(const McpServerConfig& cfg,
+                              std::function<void(const McpServerConfig&)> done);
     void setupClientSignals(const QString& serverName, const std::shared_ptr<McpQtClient>& client);
     void warmupClientTools(const QString& serverName, const std::shared_ptr<McpQtClient>& client);
     void updateServerState(const QString& serverName, McpServerState state);

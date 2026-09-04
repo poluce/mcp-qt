@@ -288,6 +288,16 @@ QJsonArray geminiTools  = client->exportAllToolsToLlmFormat(McpQtClient::LlmForm
 
 ### 多服务器路由与聚合
 
+**协议自动探测**：`http`/`sse` 类型且未显式指定 `protocolVersion` 时，SDK 会先 POST `server/discover`（2026-07-28）试探服务器——支持则自动切换无状态模式，否则回退旧协议（2025-11-25）。用户无需知道服务器协议：
+
+```json
+// 无需写 protocolVersion——SDK 自动探测
+"mcp-apps-map": { "type": "sse", "url": "http://localhost:3001/mcp" }
+// 2026-07-28 服务器 → 自动用无状态模式；旧协议服务器 → 自动用 SSE
+```
+
+显式指定 `protocolVersion` 时跳过探测（按指定版本连接）。`type` 与 `protocolVersion` 矛盾时（如 `stateless_http` + `2025-11-25`）启动时输出警告。
+
 通过 `McpHost` 外观模式统一管理多个 MCP 服务器，自动为工具名加 `serverName_` 前缀实现跨服务器路由：
 
 ```cpp

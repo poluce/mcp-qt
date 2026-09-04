@@ -40,8 +40,15 @@ void test_qt_server_manager_router() {
 
     // 验证客户端是否创建成功
     auto clientA = manager.client("test-server-a");
-    auto clientB = manager.client("test-server-b");
     TM_ASSERT_TRUE(clientA != nullptr, "clientA should be instantiated");
+    // clientB（http 类型，未显式 protocolVersion）会先做协议自动探测，
+    // 注册是异步的——轮询等待探测完成（探测含 3s 超时，最多等 5 秒）。
+    auto clientB = manager.client("test-server-b");
+    for (int i = 0; i < 100 && !clientB; ++i) {
+        QCoreApplication::processEvents();
+        QThread::msleep(50);
+        clientB = manager.client("test-server-b");
+    }
     TM_ASSERT_TRUE(clientB != nullptr, "clientB should be instantiated");
 
     // 2. 测试工具命名空间与路由层 McpToolRouter
