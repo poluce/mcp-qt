@@ -27,3 +27,5 @@ Desktop.ini
 build_sdk
 build_*
 .playwright*
+# 示例运行时日志
+multi_server_agent.log
