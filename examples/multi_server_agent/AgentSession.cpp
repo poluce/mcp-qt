@@ -1,4 +1,5 @@
 #include "examples/multi_server_agent/AgentSession.h"
+#include <mcp_qt_client/McpLogger.h>
 
 #include <QJsonArray>
 #include <QTimer>
@@ -19,7 +20,7 @@ AgentSession::AgentSession(mcp_qt::McpHost* host,
 
     // 工具调度：McpHost 自动解析 namespaced 名称并路由到对应 client
     m_executor->setToolDispatcher([this](const QString& toolName, const QJsonObject& args, std::function<void(mcp_qt::McpResult)> cb) {
-        qInfo().noquote() << "[AgentSession] Tool call:" << toolName;
+        mcp_qt::McpLogger::info(QStringLiteral("Tool call: %1").arg(toolName), QStringLiteral("AgentSession"));
         m_host->callToolAsync(toolName, args, [this, toolName, cb](mcp_qt::McpResult result) {
             if (result.isError && m_host->reporter()) {
                 m_host->reporter()->addError("tool/call", toolName + ": " + result.errorString);
@@ -91,7 +92,7 @@ void AgentSession::runTask(const QString& task) {
     if (m_taskStarted) return;
     m_taskStarted = true;
 
-    qInfo().noquote() << "[AgentSession] runTask:" << task;
+    mcp_qt::McpLogger::info(QStringLiteral("runTask: %1").arg(task), QStringLiteral("AgentSession"));
 
     QJsonArray tools = m_view->exportAllToolsToLlmFormat();
 
@@ -100,7 +101,7 @@ void AgentSession::runTask(const QString& task) {
         return;
     }
 
-    qInfo().noquote() << "[AgentSession] 启动 ReAct:" << tools.size() << "个工具（过滤后）";
+    mcp_qt::McpLogger::info(QStringLiteral("启动 ReAct: %1 个工具（过滤后）").arg(tools.size()), QStringLiteral("AgentSession"));
     if (m_host->reporter()) m_host->reporter()->addInfo("tool/discovery", QStringLiteral("%1 tools loaded").arg(tools.size()));
 
     QPointer<AgentSession> safeThis(this);
@@ -130,7 +131,7 @@ void AgentSession::finishWithError(const QString& stage, const QString& msg, con
     if (m_finished) return;
     m_finished = true;
     if (m_watchdogTimer) m_watchdogTimer->stop();
-    qWarning().noquote() << "[AgentSession] Error:" << msg;
+    mcp_qt::McpLogger::warning(QStringLiteral("Error: %1").arg(msg), QStringLiteral("AgentSession"));
     if (m_host->reporter()) m_host->reporter()->addError(stage, msg, sug);
     emit finished(1);
 }
@@ -139,7 +140,7 @@ void AgentSession::finishSuccessfully(const QString& msg) {
     if (m_finished) return;
     m_finished = true;
     if (m_watchdogTimer) m_watchdogTimer->stop();
-    qInfo().noquote() << "[AgentSession] 完成:" << msg;
+    mcp_qt::McpLogger::info(QStringLiteral("完成: %1").arg(msg), QStringLiteral("AgentSession"));
     if (m_host->reporter()) {
         m_host->reporter()->addExecutionLogLine(msg);
         m_host->reporter()->addInfo("result/render", msg);

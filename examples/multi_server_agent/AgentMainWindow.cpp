@@ -1,4 +1,5 @@
 #include "AgentMainWindow.h"
+#include <mcp_qt_client/McpLogger.h>
 #include "LlmBackends.h"
 #include "LlmCredentialResolver.h"
 #include "mcp_qt_apps/McpAppCompatibility.h"
@@ -94,6 +95,10 @@ static void writeLogFileToConfig(const QString& configPath, const QString& logFi
 AgentMainWindow::AgentMainWindow(QWidget* parent, const QString& initialConfigPath)
     : QMainWindow(parent) 
 {
+    // 统一日志：全局级别 + 文件落盘（示例展示 McpLogger 配置方式）
+    mcp_qt::McpLogger::setGlobalLevel(mcp_qt::McpLogLevel::Info);
+    mcp_qt::McpLogger::setLogFile(QStringLiteral("multi_server_agent.log"));
+
     m_network = new QNetworkAccessManager(this);
     m_host = new mcp_qt::McpHost(this); // 🌟 初始化全局单例 m_host
     m_registry = new AgentRegistry(this);
@@ -538,7 +543,7 @@ void AgentMainWindow::setupMcpAppRenderer() {
     });
 
     m_mcpAppRenderer->initializeAsync([](bool ok, const QString& err) {
-        if (!ok) qWarning() << "MCP App WebView2 init failed:" << err;
+        if (!ok) mcp_qt::McpLogger::warning(QStringLiteral("MCP App WebView2 init failed: %1").arg(err), QStringLiteral("AgentMainWindow"));
     });
 }
 
@@ -592,14 +597,18 @@ void AgentMainWindow::handleMcpAppContent(const QString& html, const QString& to
     if (!m_screenshotPath.isEmpty()) {
         QTimer::singleShot(15000, this, [this]() {
             if (!m_mcpAppRenderer) { qApp->quit(); return; }
-            qInfo().noquote() << "[AutoTask] dialog=" << (m_mcpAppDialog ? m_mcpAppDialog->size() : QSize())
-                              << "renderer=" << m_mcpAppRenderer->size();
+            mcp_qt::McpLogger::info(QStringLiteral("[AutoTask] dialog=%1x%2 renderer=%3x%4")
+                                        .arg(m_mcpAppDialog ? m_mcpAppDialog->size().width() : 0)
+                                        .arg(m_mcpAppDialog ? m_mcpAppDialog->size().height() : 0)
+                                        .arg(m_mcpAppRenderer->size().width())
+                                        .arg(m_mcpAppRenderer->size().height()),
+                                    QStringLiteral("AgentMainWindow"));
             QTimer::singleShot(60000, qApp, &QCoreApplication::quit);  // 兜底：异步链路异常也退出
             auto shot = [this](const QString& path, int delayMs) {
                 QTimer::singleShot(delayMs, this, [this, path]() {
                     m_mcpAppRenderer->capturePreviewToFile(path, [path](bool ok, const QString& err) {
-                        if (ok) qInfo().noquote() << "[AutoTask] 截图已保存:" << path;
-                        else qWarning().noquote() << "[AutoTask] 截图失败:" << path << err;
+                        if (ok) mcp_qt::McpLogger::info(QStringLiteral("[AutoTask] 截图已保存: %1").arg(path), QStringLiteral("AgentMainWindow"));
+                        else mcp_qt::McpLogger::warning(QStringLiteral("[AutoTask] 截图失败: %1 %2").arg(path, err), QStringLiteral("AgentMainWindow"));
                     });
                 });
             };
@@ -711,7 +720,7 @@ void AgentMainWindow::handleRunTask() {
             resolvedKey = resolveLlmApiKey();
             if (resolvedKey.isEmpty()) resolvedKey = m_apiKeyEdit->text().trimmed();
             if (resolvedKey.isEmpty()) {
-                qWarning().noquote() << "[AgentMainWindow] 未配置 API Key（环境变量与输入框均无），本次回退离线 Mock 演示模式";
+                mcp_qt::McpLogger::warning(QStringLiteral("未配置 API Key（环境变量与输入框均无），本次回退离线 Mock 演示模式"), QStringLiteral("AgentMainWindow"));
                 m_llmBackend = std::make_shared<MockLlmBackend>();
             } else {
                 m_llmBackend = std::make_shared<OpenAiLlmBackend>(apiUrl, resolvedKey, model, this);
@@ -936,7 +945,7 @@ void AgentMainWindow::handleResetSession() {
     }
     m_taskInputEdit->clear();
     refreshControlState();
-    qInfo().noquote() << "[AgentMainWindow] 用户手动清空重置了多轮对话会话。";
+    mcp_qt::McpLogger::info(QStringLiteral("用户手动清空重置了多轮对话会话。"), QStringLiteral("AgentMainWindow"));
 }
 
 void AgentMainWindow::handleFetchModels() {
