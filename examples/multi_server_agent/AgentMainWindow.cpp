@@ -127,7 +127,7 @@ AgentMainWindow::AgentMainWindow(QWidget* parent, const QString& initialConfigPa
         QString savedLogFile = readLogFileFromConfig(m_configPathEdit->text());
         if (!savedLogFile.isEmpty()) {
             g_logFilePath = savedLogFile;
-            m_logPathEdit->setText(QDir::toNativeSeparators(savedLogFile));
+            m_logPathEdit->setText(savedLogFile);
         }
 
         loadAndConnectServers(m_configPathEdit->text());
@@ -135,7 +135,7 @@ AgentMainWindow::AgentMainWindow(QWidget* parent, const QString& initialConfigPa
 
     // 如果命令行已经显式传递了日志路径（优先级最高），则覆盖填充
     if (!g_logFilePath.isEmpty()) {
-        m_logPathEdit->setText(QDir::toNativeSeparators(g_logFilePath));
+        m_logPathEdit->setText(g_logFilePath);
     }
 
     // 🌟 在构造函数里绑定所有 m_host 相关的长期信号，防止重复连接
@@ -622,13 +622,13 @@ void AgentMainWindow::handleMcpAppContent(const QString& html, const QString& to
 void AgentMainWindow::handleBrowseConfig() {
     QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Select MCP Server Config"), "", "*.json");
     if (!path.isEmpty()) {
-        m_configPathEdit->setText(QDir::toNativeSeparators(path));
+        m_configPathEdit->setText(path);
         
         // 切换了配置文件，自动尝试读取新配置文件里的 logFile
         QString savedLogFile = readLogFileFromConfig(path);
         if (!savedLogFile.isEmpty()) {
             g_logFilePath = savedLogFile;
-            m_logPathEdit->setText(QDir::toNativeSeparators(savedLogFile));
+            m_logPathEdit->setText(savedLogFile);
         } else {
             // 如果新配置文件中没有指定，清空当前的日志路径，保持一致
             m_logPathEdit->clear();
@@ -642,7 +642,7 @@ void AgentMainWindow::handleBrowseConfig() {
 void AgentMainWindow::handleBrowseLogFile() {
     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("选择日志保存位置"), "", "*.log");
     if (!path.isEmpty()) {
-        m_logPathEdit->setText(QDir::toNativeSeparators(path));
+        m_logPathEdit->setText(path);
         g_logFilePath = path; // 同步到全局变量
         updateGlobalLogFile(path); // 🌟 重新打开新的日志文件连接
     }

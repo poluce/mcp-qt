@@ -10,7 +10,7 @@
             "mcp-apps-map"
         ]
     },
-    "logFile": "F:\\B_My_Document\\GitHub\\mcp-cpp-agent\\examples\\multi_server_agent\\persistent_test.log",
+    "logFile": "F:/B_My_Document/GitHub/mcp-qt/examples/multi_server_agent/persistent_test.log",
     "mcpServers": {
         "everything": {
             "args": [
