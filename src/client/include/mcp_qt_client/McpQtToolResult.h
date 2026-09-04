@@ -43,6 +43,8 @@ struct McpQtToolResult {
     QJsonObject raw;                  ///< 工具调用返回的完整原始 JSON
     bool isError{false};              ///< 是否为工具级错误
     QString errorString;              ///< 错误描述（isError 为 true 时有效）
+    bool isInputRequired{false};      ///< MCP 2026-07-28: 是否处于等待用户补充输入状态
+    QJsonObject inputSchema;          ///< MCP 2026-07-28: 等待补充输入的 Schema
 };
 
 } // namespace mcp_qt

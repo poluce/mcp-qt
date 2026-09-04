@@ -1,7 +1,11 @@
 #include "AgentMainWindow.h"
+#include <mcp_qt_client/McpLogger.h>
 #include "LlmBackends.h"
+#include "LlmCredentialResolver.h"
+#include "mcp_qt_apps/McpAppCompatibility.h"
 
 #include <mcp_qt_client/McpJsonConfigLoader.h>
+#include <mcp_qt_client/McpToolRouter.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
@@ -11,11 +15,15 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QCoreApplication>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QScrollBar>
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QProgressDialog>
 #include <QDialog>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <iostream>
 
@@ -31,6 +39,13 @@ extern std::mutex g_logMutex;
 extern void updateGlobalLogFile(const QString& path);
 
 namespace mcp_agent {
+
+// 对话渲染辅助（静态，左对齐角色化记录；定义在 handleStepProgress 前）
+static void appendUserMessage(QTextEdit*, const QString&);
+static void appendAssistantMessage(QTextEdit*, const QString&);
+static void appendThinking(QTextEdit*, const QString&);
+static void appendToolCall(QTextEdit*, const QString&, const QString&);
+static void appendToolResult(QTextEdit*, const QString&);
 
 // 🌟 辅助读取配置文件中的默认日志路径
 static QString readLogFileFromConfig(const QString& configPath) {
@@ -77,17 +92,31 @@ static void writeLogFileToConfig(const QString& configPath, const QString& logFi
     }
 }
 
-AgentMainWindow::AgentMainWindow(QWidget* parent)
+AgentMainWindow::AgentMainWindow(QWidget* parent, const QString& initialConfigPath)
     : QMainWindow(parent) 
 {
+    // 统一日志：全局级别 + 文件落盘（示例展示 McpLogger 配置方式）
+    mcp_qt::McpLogger::setGlobalLevel(mcp_qt::McpLogLevel::Info);
+    mcp_qt::McpLogger::setLogFile(QStringLiteral("multi_server_agent.log"));
+
     m_network = new QNetworkAccessManager(this);
     m_host = new mcp_qt::McpHost(this); // 🌟 初始化全局单例 m_host
-    
+    m_registry = new AgentRegistry(this);
+    m_reconciler = new AgentReconciler(m_host, m_registry, this);
+    connect(m_registry, &AgentRegistry::changed, this, [this]() {
+        updateAllServerList();
+        updateCurrentAgentMcpCombo();
+    });
+
     initUi();
     applyTheme();
+    setupMcpAppRenderer();
 
     // 默认搜寻本地配置文件，提供极佳体验
-    QString defaultCfg = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../examples/multi_server_agent/examples_config.json");
+    QString defaultCfg = initialConfigPath.trimmed();
+    if (defaultCfg.isEmpty()) {
+        defaultCfg = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../examples/multi_server_agent/examples_config.json");
+    }
     if (!QFileInfo::exists(defaultCfg)) {
         defaultCfg = QDir(QDir::currentPath()).absoluteFilePath("examples/multi_server_agent/examples_config.json");
     }
@@ -98,7 +127,7 @@ AgentMainWindow::AgentMainWindow(QWidget* parent)
         QString savedLogFile = readLogFileFromConfig(m_configPathEdit->text());
         if (!savedLogFile.isEmpty()) {
             g_logFilePath = savedLogFile;
-            m_logPathEdit->setText(QDir::toNativeSeparators(savedLogFile));
+            m_logPathEdit->setText(savedLogFile);
         }
 
         loadAndConnectServers(m_configPathEdit->text());
@@ -106,28 +135,54 @@ AgentMainWindow::AgentMainWindow(QWidget* parent)
 
     // 如果命令行已经显式传递了日志路径（优先级最高），则覆盖填充
     if (!g_logFilePath.isEmpty()) {
-        m_logPathEdit->setText(QDir::toNativeSeparators(g_logFilePath));
+        m_logPathEdit->setText(g_logFilePath);
     }
 
     // 🌟 在构造函数里绑定所有 m_host 相关的长期信号，防止重复连接
     connect(m_host, &mcp_qt::McpHost::serverStateChanged, this, [this]() {
-        updateServerList();
+        updateAllServerList();
+        updateCurrentAgentMcpCombo();
     });
 
     connect(m_host, &mcp_qt::McpHost::hostReady, this, [this](bool success, const QString& msg) {
-        if (!m_isRunning && !m_sessionActive) {
+        m_hostReady = success;
+        if (m_runningAgents.isEmpty()) {
             m_runBtn->setEnabled(true);
-            m_runBtn->setText(QStringLiteral("⚡ 启动 Agent 任务"));
+            m_runBtn->setText(QStringLiteral("⚡ 发送"));
         }
         if (!success) {
             appendLogHtml(QString("<div style='color:red;'>%1</div>").arg(msg.toHtmlEscaped()));
         } else {
             m_serverLogConsole->append(m_host->getDiagnosticReport());
+            maybeRunPendingTask();  // submitTask 注入的待办任务 → 模拟用户输入 + 点发送
         }
     });
 
     connect(m_host, &mcp_qt::McpHost::errorOccurred, this, [this](const QString& name, const mcp_qt::McpError& err) {
         appendLogHtml(QString("<div style='color:red;'>[Error] %1: %2</div>").arg(name, err.message));
+    });
+
+    connect(m_host, &mcp_qt::McpHost::inputRequired, this, [this](const QString& srvName, const QString& reqId, const QJsonObject& inputRequests, const QString& requestState, mcp_qt::MrtrReplyCallback cb) {
+        appendLogHtml(QString("<div style='color:#e67e22;'><b>[MRTR 2026-07-28 多轮交互]</b> 节点 %1 请求补充输入 (ReqID: %2)</div>").arg(srvName, reqId));
+        // 演示：遍历规范 InputRequests map，构造按 key 组织的 InputResponses；
+        // requestState 由库在重发时原样回显（客户端 MUST NOT 解析/修改）
+        QJsonObject responses;
+        const QJsonObject requests = inputRequests;
+        for (auto it = requests.begin(); it != requests.end(); ++it) {
+            const QJsonObject req = it.value().toObject();
+            if (req.value(QStringLiteral("method")).toString() == QStringLiteral("elicitation/create")) {
+                const QJsonObject params = req.value(QStringLiteral("params")).toObject();
+                const QJsonObject schema = params.value(QStringLiteral("requestedSchema")).toObject();
+                QJsonObject content;
+                const QJsonObject props = schema.value(QStringLiteral("properties")).toObject();
+                for (auto p = props.begin(); p != props.end(); ++p) {
+                    content.insert(p.key(), QStringLiteral("demo-secret"));
+                }
+                responses.insert(it.key(), QJsonObject{{QStringLiteral("action"), QStringLiteral("accept")}, {QStringLiteral("content"), content}});
+            }
+        }
+        Q_UNUSED(requestState);
+        cb(responses);
     });
 }
 
@@ -230,69 +285,86 @@ void AgentMainWindow::initUi() {
 
     mainLayout->addLayout(llmGrid);
 
-    // 🌟 自动从系统环境变量中尝试提取默认的 API 密钥回显到输入框中，DEEPSEEK_API_KEY 优先
-    QString defaultKey = qEnvironmentVariable("DEEPSEEK_API_KEY");
-    if (defaultKey.isEmpty()) {
-        defaultKey = qEnvironmentVariable("OPENAI_API_KEY");
-    }
+    // 🌟 自动从系统环境变量中尝试提取默认的 API 密钥回显到输入框中（DEEPSEEK_API_KEY / DEEPSEEK / OPENAI_API_KEY）
+    const QString defaultKey = resolveLlmApiKey();
     if (!defaultKey.isEmpty()) {
         m_apiKeyEdit->setText(defaultKey);
     }
 
     // ==========================================
-    // 3. 主核心显示区
+    // 3. 主核心显示区（左侧：标签页 服务端日志/MCP 总服务；右侧：ReAct 看板 + 底部输入）
     // ==========================================
     auto* displayLayout = new QHBoxLayout();
     displayLayout->setSpacing(12);
 
-    // 左侧：服务器状态 + 服务端日志
-    auto* leftLayout = new QVBoxLayout();
-    auto* srvLabel = new QLabel(QStringLiteral("MCP 服务端状态:"), this);
-    m_serverListWidget = new QListWidget(this);
-    m_serverListWidget->setMaximumWidth(220);
-    leftLayout->addWidget(srvLabel);
-    leftLayout->addWidget(m_serverListWidget);
+    // 左侧：QTabWidget（服务端日志 / MCP 总服务）
+    m_leftTabs = new QTabWidget(this);
+    m_leftTabs->setMaximumWidth(300);
 
-    auto* logConsoleLabel = new QLabel(QStringLiteral("服务端日志 (stderr):"), this);
     m_serverLogConsole = new QTextEdit(this);
     m_serverLogConsole->setReadOnly(true);
-    m_serverLogConsole->setMaximumHeight(180);
     m_serverLogConsole->setPlaceholderText(QStringLiteral("服务端子进程的 stderr 输出将显示在这里..."));
-    leftLayout->addWidget(logConsoleLabel);
-    leftLayout->addWidget(m_serverLogConsole);
-    displayLayout->addLayout(leftLayout, 1);
+    m_leftTabs->addTab(m_serverLogConsole, QStringLiteral("服务端日志"));
 
-    // 右侧：ReAct 执行看板
-    auto* rightLayout = new QVBoxLayout();
+    m_allServerList = new QListWidget(this);
+    m_leftTabs->addTab(m_allServerList, QStringLiteral("MCP 总服务"));
+
+    displayLayout->addWidget(m_leftTabs, 1);
+
+    // 右侧：ReAct 看板（标题右侧 = agent + MCP 下拉；底部 = 输入框）
+    auto* rightPanel = new QWidget(this);
+    auto* rightLayout = new QVBoxLayout(rightPanel);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+    rightLayout->setSpacing(8);
+
+    auto* blackboardHeader = new QHBoxLayout();
     auto* blackboardLabel = new QLabel(QStringLiteral("ReAct 执行过程看板:"), this);
-    m_logBlackboard = new QTextEdit(this);
-    m_logBlackboard->setReadOnly(true);
-    m_logBlackboard->setHtml(QStringLiteral("<h3 style='color: #8e8e93; font-family: Segoe UI, Microsoft YaHei;'>系统空闲中。请在下方输入您的任务指令并点击启动...</h3>"));
-    rightLayout->addWidget(blackboardLabel);
-    rightLayout->addWidget(m_logBlackboard);
-    displayLayout->addLayout(rightLayout, 3);
+    m_agentCombo = new QComboBox(this);
+    m_agentCombo->setPlaceholderText(QStringLiteral("选择 Agent"));
+    m_currentAgentMcpCombo = new QComboBox(this);
+    blackboardHeader->addWidget(blackboardLabel);
+    blackboardHeader->addStretch();
+    blackboardHeader->addWidget(m_agentCombo);
+    auto* mcpLabel = new QLabel(QStringLiteral("MCP:"), this);
+    blackboardHeader->addWidget(mcpLabel);
+    blackboardHeader->addWidget(m_currentAgentMcpCombo);
+    rightLayout->addLayout(blackboardHeader);
 
-    mainLayout->addLayout(displayLayout, 1);
+    // 看板 + MCP App 分屏（看板 = QStackedWidget，每 agent 一页，切换 agent 切换看板）
+    m_rightSplitter = new QSplitter(Qt::Vertical, this);
+    auto* blackboardBox = new QWidget(this);
+    auto* bbLayout = new QVBoxLayout(blackboardBox);
+    bbLayout->setContentsMargins(0, 0, 0, 0);
+    m_blackboardStack = new QStackedWidget(this);
+    bbLayout->addWidget(m_blackboardStack);
+    m_rightSplitter->addWidget(blackboardBox);
 
-    // ==========================================
-    // 4. 发射指令区
-    // ==========================================
+    m_mcpAppContainer = new QWidget(this);
+    auto* appLayout = new QVBoxLayout(m_mcpAppContainer);
+    appLayout->setContentsMargins(0, 0, 0, 0);
+    auto* appLabel = new QLabel(QStringLiteral("MCP App 渲染（工具返回的交互界面）:"), this);
+    appLayout->addWidget(appLabel);
+    m_rightSplitter->addWidget(m_mcpAppContainer);
+    m_rightSplitter->setStretchFactor(0, 3);
+    m_rightSplitter->setStretchFactor(1, 2);
+    m_mcpAppContainer->hide();
+    rightLayout->addWidget(m_rightSplitter, 1);
+
+    // 输入框（看板底部）
     auto* runLayout = new QHBoxLayout();
     m_taskInputEdit = new QLineEdit(this);
-    m_taskInputEdit->setPlaceholderText(QStringLiteral("在此输入您想让 Agent 执行的任务（例如：\"search for test\" 或 \"search for AI news and take a screenshot\"）..."));
-    
-    m_runBtn = new QPushButton(QStringLiteral("⚡ 启动 Agent 任务"), this);
-    m_runBtn->setMinimumWidth(150);
-
-    m_resetSessionBtn = new QPushButton(QStringLiteral("🧹 新建对话"), this);
-    m_resetSessionBtn->setMinimumWidth(100);
+    m_taskInputEdit->setPlaceholderText(QStringLiteral("输入任务，如「search for AI news」..."));
+    m_runBtn = new QPushButton(QStringLiteral("⚡ 发送"), this);
+    m_resetSessionBtn = new QPushButton(QStringLiteral("新建"), this);
     m_resetSessionBtn->setEnabled(false);
-    m_resetSessionBtn->setStyleSheet(QStringLiteral("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8e8e93, stop:1 #636366);"));
-
-    runLayout->addWidget(m_taskInputEdit);
+    runLayout->addWidget(m_taskInputEdit, 1);
     runLayout->addWidget(m_runBtn);
     runLayout->addWidget(m_resetSessionBtn);
-    mainLayout->addLayout(runLayout);
+    rightLayout->addLayout(runLayout);
+
+    displayLayout->addWidget(rightPanel, 3);
+
+    mainLayout->addLayout(displayLayout, 1);
 
     // ==========================================
     // 信号与槽的联结
@@ -306,103 +378,257 @@ void AgentMainWindow::initUi() {
     });
     connect(m_logBrowseBtn, &QPushButton::clicked, this, &AgentMainWindow::handleBrowseLogFile);
     connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &AgentMainWindow::handleModeChanged);
+    connect(m_agentCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        m_currentAgent = m_agentCombo->currentText();
+        updateCurrentAgentMcpCombo();
+        showAgentBlackboard(m_currentAgent);
+        refreshControlState();
+    });
     connect(m_runBtn, &QPushButton::clicked, this, &AgentMainWindow::handleRunTask);
     connect(m_taskInputEdit, &QLineEdit::returnPressed, this, &AgentMainWindow::handleRunTask);
     connect(m_fetchModelsBtn, &QPushButton::clicked, this, &AgentMainWindow::handleFetchModels);
     connect(m_resetSessionBtn, &QPushButton::clicked, this, &AgentMainWindow::handleResetSession);
 
     connect(m_modelCombo, &QComboBox::currentTextChanged, this, [this](){}); // To fix any warnings if needed, but the important is below
-    connect(m_serverListWidget, &QListWidget::itemDoubleClicked, this, &AgentMainWindow::handleServerDoubleClicked);
+    connect(m_allServerList, &QListWidget::itemDoubleClicked, this, &AgentMainWindow::handleServerDoubleClicked);
 
     // 🌟 默认选中“在线 OpenAI 兼容 API”模式，开启全部配置框输入权限
     m_modeCombo->setCurrentIndex(1);
 }
 
 void AgentMainWindow::applyTheme() {
-    // 高雅浅色现代纸张感主题 (Modern Light Theme)
+    // 现代浅色主题 (Modern Light)：统一色板、卡片圆角、hover 反馈、清晰层级
     QString qss = R"(
-        QMainWindow {
+        QMainWindow, QWidget {
             background-color: #f5f7fa;
+            color: #1f2329;
+            font-family: "Segoe UI", "Microsoft YaHei";
         }
         QLabel {
-            color: #2c3e50;
-            font-family: "Segoe UI", "Microsoft YaHei";
+            color: #30343a;
             font-size: 12px;
-            font-weight: bold;
+            font-weight: 600;
         }
-        QLineEdit {
+        QLineEdit, QComboBox, QTextEdit, QListWidget {
             background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.15);
-            border-radius: 5px;
+            border: 1px solid #d8dde3;
+            border-radius: 6px;
             padding: 6px;
-            color: #2c3e50;
-            font-family: "Segoe UI", "Microsoft YaHei";
+            color: #1f2329;
+            selection-background-color: #dbeafe;
+            selection-color: #1f2329;
         }
-        QLineEdit:focus {
-            border: 1px solid #007aff;
+        QLineEdit:focus, QComboBox:focus, QTextEdit:focus {
+            border: 1px solid #3b82f6;
         }
-        QLineEdit:disabled {
-            background-color: #e9ecef;
-            color: #adb5bd;
-            border: 1px solid rgba(0, 0, 0, 0.08);
+        QLineEdit:disabled, QComboBox:disabled {
+            background-color: #eef1f4;
+            color: #9aa2ab;
         }
-        QComboBox {
-            background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.15);
-            border-radius: 5px;
-            padding: 6px;
-            color: #2c3e50;
-            min-width: 150px;
+        QComboBox::drop-down {
+            border: none;
+            width: 22px;
         }
         QPushButton {
-            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #007aff, stop:1 #0056b3);
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 5px;
+            background-color: #3b82f6;
+            border: none;
+            border-radius: 6px;
             color: #ffffff;
-            padding: 6px 14px;
-            font-family: "Segoe UI", "Microsoft YaHei";
-            font-weight: bold;
+            padding: 7px 16px;
+            font-weight: 600;
         }
         QPushButton:hover {
-            background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1485ff, stop:1 #0066d6);
+            background-color: #2f74e0;
         }
         QPushButton:pressed {
-            background-color: #004085;
+            background-color: #2563eb;
         }
         QPushButton:disabled {
-            background-color: #ced4da;
-            color: #6c757d;
-            border: 1px solid rgba(0, 0, 0, 0.05);
+            background-color: #d3d9df;
+            color: #8a929b;
+        }
+        QPushButton[secondary="true"] {
+            background-color: #6b7280;
+        }
+        QPushButton[secondary="true"]:hover {
+            background-color: #5b6470;
         }
         QListWidget {
-            background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 6px;
-            color: #2c3e50;
-            padding: 5px;
-            font-family: "Segoe UI", "Microsoft YaHei";
+            padding: 4px;
+        }
+        QListWidget::item {
+            padding: 6px;
+            border-radius: 4px;
+        }
+        QListWidget::item:hover {
+            background-color: #eef2f7;
+        }
+        QListWidget::item:selected {
+            background-color: #dbeafe;
+            color: #1f2329;
         }
         QTextEdit {
-            background-color: #ffffff;
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 6px;
-            color: #2c3e50;
-            padding: 12px;
+            padding: 8px;
+        }
+        QSplitter::handle {
+            background-color: #e2e6ea;
+        }
+        QSplitter::handle:vertical {
+            height: 2px;
+        }
+        QScrollBar:vertical {
+            background: transparent;
+            width: 10px;
+        }
+        QScrollBar::handle:vertical {
+            background: #c9cfd6;
+            border-radius: 5px;
+            min-height: 30px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #adb5bd;
         }
     )";
     setStyleSheet(qss);
 }
 
+// ========== MCP Apps 渲染（内嵌 WebView2 + AppBridge）==========
+void AgentMainWindow::setupMcpAppRenderer() {
+    if (m_mcpAppRenderer) return;
+
+    // MCP App 用独立弹窗展示（比内嵌面板大、可自由缩放）
+    m_mcpAppDialog = new QDialog(this);
+    m_mcpAppDialog->setWindowTitle(QStringLiteral("MCP App"));
+    m_mcpAppDialog->resize(960, 720);
+    // 初始尺寸作为下限：App 的 size-changed 请求只允许放大，不允许把弹窗缩得更小（避免太小）
+    m_mcpAppDialog->setMinimumSize(960, 720);
+    m_mcpAppDialog->setWindowFlags(m_mcpAppDialog->windowFlags() | Qt::WindowMaximizeButtonHint);
+    auto* dlgLayout = new QVBoxLayout(m_mcpAppDialog);
+    dlgLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_mcpAppRenderer = new mcp_qt::McpAppWebView2Renderer(m_mcpAppDialog);
+    // Standard compatibility adapters are composed by the host application,
+    // keeping the generic WebView renderer free of App-specific knowledge.
+    m_mcpAppRenderer->setContentAdapterRegistry(
+        mcp_qt::createStandardMcpAppCompatibilityAdapters());
+    m_mcpAppRenderer->setUiMeta(QJsonObject{});  // 无 csp/permissions 声明 → 限制性默认
+    dlgLayout->addWidget(m_mcpAppRenderer);
+
+    m_mcpAppBridge = std::make_shared<mcp_qt::McpAppBridge>();
+    m_mcpAppBridge->attach(m_mcpAppRenderer, nullptr);  // 占位（渲染具体 App 时替换为该服务器 client）
+    m_mcpAppBridge->setHostInfo(QStringLiteral("mcp-qt-multi-agent"), QStringLiteral("1.0.0"));
+    m_mcpAppBridge->setOpenLinkHandler([](const QJsonObject& params, mcp_qt::McpAppBridge::UiRequestRespond respond) {
+        const QUrl url(params.value(QStringLiteral("url")).toString());
+        if (!QDesktopServices::openUrl(url)) {
+            respond(QJsonObject{}, -1, QStringLiteral("open link failed"));
+            return;
+        }
+        respond(QJsonObject{}, 0, QString());
+    });
+    m_mcpAppBridge->setDisplayModes({QStringLiteral("inline"), QStringLiteral("fullscreen")});
+    m_mcpAppBridge->start();
+
+    // displayMode 协商 → 弹窗全屏/普通切换
+    connect(m_mcpAppBridge.get(), &mcp_qt::McpAppBridge::displayModeChanged, this, [this](const QString& mode) {
+        if (!m_mcpAppDialog) return;
+        // 桌面端保留系统标题栏，始终给用户提供还原与关闭出口。
+        if (mode == QLatin1String("fullscreen")) m_mcpAppDialog->showMaximized();
+        else if (mode == QLatin1String("inline")) m_mcpAppDialog->showNormal();
+    });
+    // size-changed → 弹窗适配 App 尺寸
+    connect(m_mcpAppBridge.get(), &mcp_qt::McpAppBridge::appSizeChanged, this, [this](int w, int h) {
+        if (m_mcpAppDialog && m_mcpAppDialog->isVisible()) {
+            m_mcpAppDialog->resize(qMax(480, w), qMax(360, h));
+        }
+    });
+
+    m_mcpAppRenderer->initializeAsync([](bool ok, const QString& err) {
+        if (!ok) mcp_qt::McpLogger::warning(QStringLiteral("MCP App WebView2 init failed: %1").arg(err), QStringLiteral("AgentMainWindow"));
+    });
+}
+
+void AgentMainWindow::showMcpAppPanel(bool visible) {
+    if (!m_mcpAppContainer) return;
+    m_mcpAppVisible = visible;
+    m_mcpAppContainer->setVisible(visible);
+    if (visible && m_rightSplitter) {
+        const QList<int> sizes = m_rightSplitter->sizes();
+        if (sizes.size() == 2) {
+            const int total = sizes[0] + sizes[1];
+            m_rightSplitter->setSizes({total * 3 / 5, total * 2 / 5});  // 看板 60% / App 40%
+        }
+    }
+}
+
+void AgentMainWindow::handleMcpAppContent(const QString& html, const QString& toolName,
+                                          const QJsonObject& uiMeta, const QJsonObject& toolInput,
+                                          const QJsonObject& toolResult) {
+    if (!m_mcpAppRenderer || !m_mcpAppBridge) setupMcpAppRenderer();
+    if (!m_mcpAppRenderer) return;
+
+    // 从 namespaced 工具名（serverName_toolName）解析 serverName，attach 真实 client
+    const auto pair = m_host->toolRouter()->parseToolName(toolName);
+    const QString serverName = pair.first;
+    // 每个新 App 资源都开始独立的 initialized 生命周期；即使 client 查找失败，
+    // 也要重置上一 View 的状态，避免通知误发给旧页面。
+    auto client = serverName.isEmpty() ? std::shared_ptr<mcp_qt::McpQtClient>()
+                                       : m_host->client(serverName);
+    m_mcpAppBridge->attach(m_mcpAppRenderer, client);
+
+    // 应用服务器声明的 _meta.ui（含 csp/permissions），避免默认严格 CSP 拦掉外部 CDN
+    m_mcpAppRenderer->setUiMeta(uiMeta);
+    m_mcpAppRenderer->loadHtml(html, QUrl());
+    // 此时 View 往往尚未 initialized；Bridge 会暂存并在握手完成后按顺序发送。
+    m_mcpAppBridge->sendToolInput(toolInput);
+    m_mcpAppBridge->sendToolResult(toolResult);
+
+    // MCP App 用独立弹窗展示（比内嵌面板大、可自由缩放）
+    if (m_mcpAppDialog) {
+        m_mcpAppDialog->show();
+        m_mcpAppDialog->raise();
+        m_mcpAppDialog->activateWindow();
+    }
+    appendLogHtml(QStringLiteral("<p style='color:#0a7d33;'><b>◇ MCP App 已弹出：</b>%1</p>")
+                      .arg(toolName.toHtmlEscaped()));
+
+    // 自动化：--screenshot 传入时，MCP App 渲染后延迟截图，然后退出
+    // 用 WebView2 CapturePreview 抓真实渲染内容（GDI grabWindow 对 DirectComposition 表面返回空白）
+    // 三连拍（15s/35s/55s）：区分「CDN 瓦片经代理加载慢」与「相机/渲染未就位」两类黑屏
+    if (!m_screenshotPath.isEmpty()) {
+        QTimer::singleShot(15000, this, [this]() {
+            if (!m_mcpAppRenderer) { qApp->quit(); return; }
+            mcp_qt::McpLogger::info(QStringLiteral("[AutoTask] dialog=%1x%2 renderer=%3x%4")
+                                        .arg(m_mcpAppDialog ? m_mcpAppDialog->size().width() : 0)
+                                        .arg(m_mcpAppDialog ? m_mcpAppDialog->size().height() : 0)
+                                        .arg(m_mcpAppRenderer->size().width())
+                                        .arg(m_mcpAppRenderer->size().height()),
+                                    QStringLiteral("AgentMainWindow"));
+            QTimer::singleShot(60000, qApp, &QCoreApplication::quit);  // 兜底：异步链路异常也退出
+            auto shot = [this](const QString& path, int delayMs) {
+                QTimer::singleShot(delayMs, this, [this, path]() {
+                    m_mcpAppRenderer->capturePreviewToFile(path, [path](bool ok, const QString& err) {
+                        if (ok) mcp_qt::McpLogger::info(QStringLiteral("[AutoTask] 截图已保存: %1").arg(path), QStringLiteral("AgentMainWindow"));
+                        else mcp_qt::McpLogger::warning(QStringLiteral("[AutoTask] 截图失败: %1 %2").arg(path, err), QStringLiteral("AgentMainWindow"));
+                    });
+                });
+            };
+            shot(m_screenshotPath, 0);                         // t=15s（距渲染）
+            shot(m_screenshotPath + QStringLiteral(".t35.png"), 20000);  // t=35s
+            shot(m_screenshotPath + QStringLiteral(".t55.png"), 40000);  // t=55s
+        });
+    }
+}
+
 void AgentMainWindow::handleBrowseConfig() {
     QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Select MCP Server Config"), "", "*.json");
     if (!path.isEmpty()) {
-        m_configPathEdit->setText(QDir::toNativeSeparators(path));
+        m_configPathEdit->setText(path);
         
         // 切换了配置文件，自动尝试读取新配置文件里的 logFile
         QString savedLogFile = readLogFileFromConfig(path);
         if (!savedLogFile.isEmpty()) {
             g_logFilePath = savedLogFile;
-            m_logPathEdit->setText(QDir::toNativeSeparators(savedLogFile));
+            m_logPathEdit->setText(savedLogFile);
         } else {
             // 如果新配置文件中没有指定，清空当前的日志路径，保持一致
             m_logPathEdit->clear();
@@ -416,7 +642,7 @@ void AgentMainWindow::handleBrowseConfig() {
 void AgentMainWindow::handleBrowseLogFile() {
     QString path = QFileDialog::getSaveFileName(this, QStringLiteral("选择日志保存位置"), "", "*.log");
     if (!path.isEmpty()) {
-        m_logPathEdit->setText(QDir::toNativeSeparators(path));
+        m_logPathEdit->setText(path);
         g_logFilePath = path; // 同步到全局变量
         updateGlobalLogFile(path); // 🌟 重新打开新的日志文件连接
     }
@@ -430,12 +656,40 @@ void AgentMainWindow::handleModeChanged(int index) {
     m_fetchModelsBtn->setEnabled(enableLlm);
 }
 
+void AgentMainWindow::submitTask(const QString& task) {
+    const QString t = task.trimmed();
+    if (t.isEmpty()) return;
+    m_pendingTask = t;
+    maybeRunPendingTask();
+}
+
+void AgentMainWindow::setAutomatedToolCall(const QString& toolName, const QJsonObject& arguments)
+{
+    m_automatedToolName = toolName.trimmed();
+    m_automatedToolArguments = arguments;
+}
+
+void AgentMainWindow::maybeRunPendingTask() {
+    if (m_pendingTask.isEmpty() || !m_hostReady) return;  // 未就绪则等 hostReady 再触发
+    QTimer::singleShot(800, this, [this]() {
+        if (m_pendingTask.isEmpty()) return;
+        m_taskInputEdit->setText(m_pendingTask);  // 模拟用户输入
+        m_pendingTask.clear();
+        handleRunTask();                            // 模拟点击「发送」
+    });
+}
+
 void AgentMainWindow::handleRunTask() {
-    if (m_isRunning) return;
+    const QString agent = m_agentCombo->currentText();
+    if (agent.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请先选择一个 Agent！"));
+        return;
+    }
+    if (m_runningAgents.contains(agent)) return; // 该 agent 正在跑任务，忽略重复点击
 
     QString configPath = m_configPathEdit->text().trimmed();
     QString task = m_taskInputEdit->text().trimmed();
-    
+
     // 同步输入框中的日志文件路径到全局变量，并物理更新文件句柄
     QString currentLogPath = m_logPathEdit->text().trimmed();
     if (currentLogPath != g_logFilePath) {
@@ -453,71 +707,60 @@ void AgentMainWindow::handleRunTask() {
     }
     m_taskInputEdit->clear();
 
-    // 🌟 将日志输出位置保存到 examples_config.json 中
-    writeLogFileToConfig(configPath, g_logFilePath);
+    const bool isActive = m_activeSessionAgents.contains(agent);
+    QString resolvedKey;  // 解析后的 API Key（环境变量优先）
+    if (!isActive) {
+        if (!m_automatedToolName.isEmpty()) {
+            m_llmBackend = std::make_shared<ScriptedToolLlmBackend>(
+                m_automatedToolName, m_automatedToolArguments);
+        } else if (m_modeCombo->currentIndex() == 1) {
+            // 首轮：构建 LLM 驱动（始终优先读环境变量 DEEPSEEK_API_KEY / OPENAI_API_KEY，免手动输入）
+            QString apiUrl = m_apiUrlEdit->text().trimmed();
+            QString model = m_modelCombo->currentText().trimmed();
+            resolvedKey = resolveLlmApiKey();
+            if (resolvedKey.isEmpty()) resolvedKey = m_apiKeyEdit->text().trimmed();
+            if (resolvedKey.isEmpty()) {
+                mcp_qt::McpLogger::warning(QStringLiteral("未配置 API Key（环境变量与输入框均无），本次回退离线 Mock 演示模式"), QStringLiteral("AgentMainWindow"));
+                m_llmBackend = std::make_shared<MockLlmBackend>();
+            } else {
+                m_llmBackend = std::make_shared<OpenAiLlmBackend>(apiUrl, resolvedKey, model, this);
+            }
+        } else {
+            m_llmBackend = std::make_shared<MockLlmBackend>();
+        }
 
-    // 🌟 如果是启动第一轮，清空已有的日志文件
-    if (!m_sessionActive && !g_logFilePath.isEmpty()) {
-        // 通过以 Truncate 方式重开全局长连接，瞬间物理清空日志！
-        std::lock_guard<std::mutex> lock(g_logMutex);
-        if (g_logFile) {
-            g_logFile->close();
-            g_logFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text | QIODevice::Unbuffered);
+        // 首轮全局清空日志文件
+        if (m_activeSessionAgents.isEmpty() && !g_logFilePath.isEmpty()) {
+            std::lock_guard<std::mutex> lock(g_logMutex);
+            if (g_logFile) {
+                g_logFile->close();
+                g_logFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text | QIODevice::Unbuffered);
+            }
         }
     }
 
-    m_isRunning = true;
-    m_runBtn->setEnabled(false);
-    m_runBtn->setText(QStringLiteral("⏳ 连接预热中..."));
-    m_taskInputEdit->setEnabled(false);
-    m_configPathEdit->setEnabled(false);
-    m_browseBtn->setEnabled(false);
-    m_logPathEdit->setEnabled(false);
-    m_logBrowseBtn->setEnabled(false);
-    m_modeCombo->setEnabled(false);
-    m_modelCombo->setEnabled(false);
-    m_fetchModelsBtn->setEnabled(false);
-    m_resetSessionBtn->setEnabled(false); // 运行期间禁用重置
+    // 取（或建）该 agent 的会话与看板，并切到它的看板
+    AgentSession* sess = sessionForAgent(agent);
+    showAgentBlackboard(agent);
+    QTextEdit* blackboard = blackboardForAgent(agent);
 
-    // 🌟 多轮会话分支判断
-    if (m_sessionActive && m_session) {
-        // 已经是活跃的会话，直接追加对话运行，不清空看板和 Session！
-        appendLogHtml(QStringLiteral("<hr style='border: 1px dashed rgba(0,0,0,0.1); margin: 15px 0;'/>"));
-        appendLogHtml(QString(QStringLiteral("<h3 style='color: #007aff; font-family: Segoe UI, Microsoft YaHei; margin: 0 0 8px 0;'>💬 发送多轮对话: \"%1\"</h3>")).arg(task.toHtmlEscaped()));
-        
-        m_session->continueConversation(task);
+    if (isActive) {
+        // 多轮：直接追加对话，保留该 agent 的看板与会话状态
+        appendUserMessage(blackboard, task);
+        m_runningAgents.insert(agent);
+        refreshControlState();
+        sess->continueConversation(task);
         return;
     }
 
-    // 初始化黑板日志
-    m_logBlackboard->clear();
-    appendLogHtml(QStringLiteral("<h2 style='color: #ff9500; font-family: Segoe UI, Microsoft YaHei; margin: 0 0 10px 0;'>⚡ ReAct 执行环路初始化中...</h2>"));
+    // 首轮：清空该 agent 的看板并初始化
+    blackboard->clear();
+    appendLogHtml(QStringLiteral("<div style='color:#8e8e93; font-size:12px; margin:4px 0;'>⚡ ReAct 执行环路初始化中...</div>"));
+    appendUserMessage(blackboard, task);
 
-    // 实例化 LLM 驱动
-    if (m_modeCombo->currentIndex() == 1) {
-        QString apiUrl = m_apiUrlEdit->text().trimmed();
-        QString apiKey = m_apiKeyEdit->text().trimmed();
-        QString model = m_modelCombo->currentText().trimmed();
-
-        if (apiKey.isEmpty()) {
-            apiKey = qEnvironmentVariable("DEEPSEEK_API_KEY");
-            if (apiKey.isEmpty()) {
-                apiKey = qEnvironmentVariable("OPENAI_API_KEY");
-                if (apiKey.isEmpty()) {
-                    QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("API 密钥不能为空，请在界面中输入！"));
-                    return;
-                }
-            }
-        }
-        m_llmBackend = std::make_shared<OpenAiLlmBackend>(apiUrl, apiKey, model, this);
-    } else {
-        m_llmBackend = std::make_shared<MockLlmBackend>();
-    }
-    m_session = new AgentSession(m_host, m_llmBackend, this);
-    
-    // 监听 ReAct 循环信号并着色展示
-    connect(m_session->executor(), &LlmAgentExecutor::stepProgress, this, &AgentMainWindow::handleStepProgress);
-    connect(m_session, &AgentSession::finished, this, &AgentMainWindow::handleSessionFinished);
+    // 限定该 agent 的可见工具面 = 其服务器集合
+    const QStringList servers = m_registry ? m_registry->serversFor(agent) : QStringList();
+    sess->setServerFilter(servers);
 
     AgentRunOptions options;
     options.configPath = configPath;
@@ -525,174 +768,184 @@ void AgentMainWindow::handleRunTask() {
     options.timeoutMs = 15000; // 15秒超时
     options.useRealLlm = (m_modeCombo->currentIndex() == 1);
     options.apiUrl = m_apiUrlEdit->text().trimmed();
-    options.apiKey = m_apiKeyEdit->text().trimmed();
+    options.apiKey = resolvedKey;
     options.modelName = m_modelCombo->currentText().trimmed();
 
-    m_session->start(options);
-    updateServerList();
+    m_runningAgents.insert(agent);
+    refreshControlState();
+    sess->start(options);
+    updateAllServerList();
 }
 
-void AgentMainWindow::updateServerList() {
-    m_serverListWidget->clear();
+void AgentMainWindow::updateAllServerList() {
+    m_allServerList->clear();
     if (!m_host) return;
 
-    for (const auto& name : m_host->serverNames()) {
+    const QStringList referenced = m_registry ? m_registry->allServers() : QStringList();
+    // 显示全部配置的服务器（含未启用），未引用/未连接状态分别标记
+    for (const QString& name : m_host->configuredServerNames()) {
+        // 未被任何 agent 引用 → 对账器预期禁用，标灰提示
+        if (!referenced.contains(name)) {
+            auto* item = new QListWidgetItem(QString("⚪ %1 (未引用)").arg(name));
+            item->setData(Qt::UserRole, name);
+            item->setForeground(QBrush(QColor("#8e8e93")));
+            m_allServerList->addItem(item);
+            continue;
+        }
         auto state = m_host->serverState(name);
         bool ready = (state == mcp_qt::McpServerState::Ready);
         bool connecting = (state == mcp_qt::McpServerState::Connecting);
-
         QString label;
         if (ready) {
-            int count = m_host->serverToolCount(name);
-            label = QString("🟢 %1 (%2 tools)").arg(name).arg(count);
+            label = QString("🟢 %1 (%2 tools)").arg(name).arg(m_host->serverToolCount(name));
         } else if (connecting) {
             label = QString("⌛ %1 (connecting)").arg(name);
         } else {
             label = QString("🔴 %1").arg(name);
         }
-
         auto* item = new QListWidgetItem(label);
         item->setData(Qt::UserRole, name);
         item->setForeground(QBrush(ready ? QColor("#28a745") : QColor("#dc3545")));
-        m_serverListWidget->addItem(item);
+        m_allServerList->addItem(item);
     }
 }
 
-void AgentMainWindow::handleStepProgress(const QString& type, const QString& content) {
-    QString html;
-    QString safeContent = content.toHtmlEscaped().replace("\n", "<br>");
-    QString timeStr = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
+void AgentMainWindow::updateCurrentAgentMcpCombo() {
+    if (!m_currentAgentMcpCombo || !m_registry) return;
+    m_currentAgentMcpCombo->clear();
+    const QString agent = m_agentCombo->currentText();
+    if (agent.isEmpty()) return;
+    m_currentAgentMcpCombo->addItems(m_registry->serversFor(agent));
+}
+
+// ============================================================================
+// 对话渲染：左对齐角色化记录（用户 / 助手 / 工具调用 / 工具结果），无头像。
+// 助手回答走 Qt 内置 Markdown 解析（QTextDocument::setMarkdown）。
+// ============================================================================
+static QString renderMarkdownToHtml(const QString& md) {
+    QTextDocument doc;
+    doc.setMarkdown(md);
+    QString html = doc.toHtml();
+    const int b1 = html.indexOf(QStringLiteral("<body"));
+    const int b2 = html.indexOf(QLatin1Char('>'), b1);
+    const int e1 = html.lastIndexOf(QStringLiteral("</body>"));
+    if (b1 >= 0 && e1 > b2) {
+        return html.mid(b2 + 1, e1 - b2 - 1);
+    }
+    return html;
+}
+
+static QString esc(const QString& s) {
+    return s.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+}
+
+static void appendUserMessage(QTextEdit* bb, const QString& text) {
+    if (!bb) return;
+    bb->append(QStringLiteral(
+        "<br><div style='margin:4px 0;'>"
+        "  <div style='color:#2f6fed; font-size:11px; font-weight:600; margin-bottom:2px;'>👤 用户</div>"
+        "  <div style='background:#eef3ff; border:1px solid #d6e2ff; border-radius:6px; padding:8px 12px; "
+        "           font-family:Segoe UI, Microsoft YaHei; font-size:13px; color:#1c2128;'>%1</div>"
+        "</div>").arg(esc(text)));
+}
+
+static void appendAssistantMessage(QTextEdit* bb, const QString& markdown) {
+    if (!bb) return;
+    bb->append(QStringLiteral(
+        "<br><div style='margin:4px 0;'>"
+        "  <div style='color:#1f9d57; font-size:11px; font-weight:600; margin-bottom:2px;'>🤖 助手</div>"
+        "  <div style='background:#f2f6f3; border:1px solid #dcebe0; border-radius:6px; padding:8px 12px; "
+        "           font-family:Segoe UI, Microsoft YaHei; font-size:13px; color:#1c2128;'>%1</div>"
+        "</div>").arg(renderMarkdownToHtml(markdown)));
+}
+
+static void appendThinking(QTextEdit* bb, const QString& text) {
+    if (!bb) return;
+    bb->append(QStringLiteral(
+        "<br><div style='margin:4px 0; color:#8e8e93; font-size:12px; border-left:3px solid #d1d5db; padding-left:8px;'>💭 %1</div>"
+    ).arg(esc(text)));
+}
+
+static void appendToolCall(QTextEdit* bb, const QString& name, const QString& args) {
+    if (!bb) return;
+    const QString nameSafe = name.toHtmlEscaped();
+    const QString argsHtml = args.isEmpty() ? QString() : QStringLiteral("<br>") + esc(args);
+    bb->append(QStringLiteral(
+        "<br><div style='margin:4px 0;'>"
+        "  <div style='color:#34c759; font-size:11px; font-weight:600; margin-bottom:2px;'>🔧 工具调用</div>"
+        "  <div style='background:#f2fbf4; border:1px solid #d9f0de; border-radius:6px; padding:8px 12px; "
+        "           font-family:Consolas, monospace; font-size:12px; color:#155724;'><b>%1</b>%2</div>"
+        "</div>").arg(nameSafe, argsHtml));
+}
+
+static void appendToolResult(QTextEdit* bb, const QString& result) {
+    if (!bb) return;
+    bb->append(QStringLiteral(
+        "<br><div style='margin:4px 0;'>"
+        "  <div style='color:#af52de; font-size:11px; font-weight:600; margin-bottom:2px;'>👁️ 工具结果</div>"
+        "  <div style='background:#faf4fc; border:1px solid #ecdaf2; border-radius:6px; padding:8px 12px; "
+        "           font-family:Consolas, monospace; font-size:12px; color:#4a154b;'>%1</div>"
+        "</div>").arg(esc(result)));
+}
+
+void AgentMainWindow::handleStepProgress(QTextEdit* blackboard, const QString& type, const QString& content) {
+    if (!blackboard) return;
 
     if (type == "thought") {
-        html = QString(
-            "<div style='background-color: rgba(0, 122, 255, 0.05); border-left: 4px solid #007aff; "
-            "padding: 10px; margin: 6px 0; border-radius: 4px; font-family: Segoe UI, Microsoft YaHei;'>"
-            "  <div style='color: #8e8e93; font-size: 10px; font-family: Consolas, monospace; margin-bottom: 4px;'>[%1] [大模型推理决策阶段]</div>"
-            "  <b style='color: #007aff; font-size: 12px;'>💭 思考规划 (THOUGHT)</b>"
-            "  <p style='color: #2c3e50; margin: 4px 0 0 0; line-height: 1.4; font-size: 13px;'>%2</p>"
-            "</div>"
-        ).arg(timeStr, safeContent);
-    } 
-    else if (type == "act") {
-        html = QString(
-            "<div style='background-color: rgba(52, 199, 89, 0.05); border-left: 4px solid #34c759; "
-            "padding: 10px; margin: 6px 0; border-radius: 4px; font-family: Consolas, monospace;'>"
-            "  <div style='color: #8e8e93; font-size: 10px; font-family: Consolas, monospace; margin-bottom: 4px;'>[%1] [工具执行调用阶段]</div>"
-            "  <b style='color: #34c759; font-size: 12px;'>🚀 动作执行 (ACT - 工具调用)</b>"
-            "  <p style='color: #155724; margin: 4px 0 0 0; line-height: 1.4; font-size: 12px;'>%2</p>"
-            "</div>"
-        ).arg(timeStr, safeContent);
-    } 
-    else if (type == "observation") {
-        html = QString(
-            "<div style='background-color: rgba(175, 82, 222, 0.05); border-left: 4px solid #af52de; "
-            "padding: 10px; margin: 6px 0; border-radius: 4px; font-family: Consolas, monospace;'>"
-            "  <div style='color: #8e8e93; font-size: 10px; font-family: Consolas, monospace; margin-bottom: 4px;'>[%1] [外部反馈接收阶段]</div>"
-            "  <b style='color: #af52de; font-size: 12px;'>👁️ 状态观测 (OBSERVATION - 结果反馈)</b>"
-            "  <p style='color: #4a154b; margin: 4px 0 0 0; line-height: 1.4; font-size: 12px;'>%2</p>"
-            "</div>"
-        ).arg(timeStr, safeContent);
-    } 
-    else if (type == "answer") {
-        html = QString(
-            "<div style='background-color: rgba(255, 149, 0, 0.06); border-left: 4px solid #ff9500; "
-            "padding: 12px; margin: 8px 0; border-radius: 6px; border: 1px solid rgba(255, 149, 0, 0.2); "
-            "font-family: Segoe UI, Microsoft YaHei;'>"
-            "  <div style='color: #8e8e93; font-size: 10px; font-family: Consolas, monospace; margin-bottom: 4px;'>[%1] [任务目标达成终结]</div>"
-            "  <b style='color: #ff9500; font-size: 13px;'>🏆 最终答案 (FINAL ANSWER)</b>"
-            "  <p style='color: #212529; margin: 6px 0 0 0; line-height: 1.5; font-size: 13px; font-weight: bold;'>%2</p>"
-            "</div>"
-        ).arg(timeStr, safeContent);
+        appendThinking(blackboard, content);
+    } else if (type == "act") {
+        // content 形如 "toolName\nargs" 或纯 "toolName"
+        const QString trimmed = content.trimmed();
+        QString name = trimmed;
+        QString args;
+        const int nl = trimmed.indexOf(QLatin1Char('\n'));
+        if (nl >= 0) { name = trimmed.left(nl).trimmed(); args = trimmed.mid(nl + 1).trimmed(); }
+        appendToolCall(blackboard, name, args);
+    } else if (type == "observation") {
+        appendToolResult(blackboard, content);
+    } else if (type == "answer") {
+        appendAssistantMessage(blackboard, content);  // Markdown 解析
     }
-
-    appendLogHtml(html);
 }
 
-void AgentMainWindow::handleSessionFinished(int exitCode) {
-    m_isRunning = false;
-    m_runBtn->setEnabled(true);
-    m_taskInputEdit->setEnabled(true);
-
-    updateServerList();
+void AgentMainWindow::handleSessionFinished(const QString& agent, int exitCode) {
+    m_runningAgents.remove(agent);
+    QTextEdit* blackboard = m_agentBlackboards.value(agent);
 
     if (exitCode == 0) {
-        // 🌟 任务运行成功，将会话置为“活跃多轮状态”
-        m_sessionActive = true;
-        m_resetSessionBtn->setEnabled(true);
-        m_resetSessionBtn->setStyleSheet(QStringLiteral("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff3b30, stop:1 #ff2d55);")); // 高亮粉红色
-
-        // 更改启动按钮为“发送对话”
-        m_runBtn->setText(QStringLiteral("💬 发送对话"));
-
-        // 保持配置区的禁用锁定
-        m_configPathEdit->setEnabled(false);
-        m_browseBtn->setEnabled(false);
-        m_logPathEdit->setEnabled(false);
-        m_logBrowseBtn->setEnabled(false);
-        m_modeCombo->setEnabled(false);
-        m_modelCombo->setEnabled(false);
-        m_fetchModelsBtn->setEnabled(false);
-
-        QString statusHtml = QStringLiteral("<h4 style='color: #28a745; font-family: Segoe UI, Microsoft YaHei;'>✔ 本轮对话回答完毕，Agent 会话已保持挂起，您可在下方输入以继续多轮交谈。</h4>");
-        appendLogHtml("<br>" + statusHtml);
+        // 任务运行成功，该 agent 进入多轮活跃状态
+        m_activeSessionAgents.insert(agent);
     } else {
-        // 执行失败，重置会话
-        m_sessionActive = false;
-        m_resetSessionBtn->setEnabled(false);
-        m_resetSessionBtn->setStyleSheet(QStringLiteral("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8e8e93, stop:1 #636366);"));
-        m_runBtn->setText(QStringLiteral("⚡ 启动 Agent 任务"));
-
-        // 恢复配置区的启用
-        m_configPathEdit->setEnabled(true);
-        m_browseBtn->setEnabled(true);
-        m_logPathEdit->setEnabled(true);
-        m_logBrowseBtn->setEnabled(true);
-        m_modeCombo->setEnabled(true);
-        m_modelCombo->setEnabled(m_modeCombo->currentIndex() == 1);
-        m_fetchModelsBtn->setEnabled(m_modeCombo->currentIndex() == 1);
-
-        QString statusHtml = QStringLiteral("<h4 style='color: #dc3545; font-family: Segoe UI, Microsoft YaHei;'>❌ ReAct Agent 任务执行失败或超时。</h4>");
-        appendLogHtml("<br>" + statusHtml);
-
-        // 释放资源
-        if (m_session) {
-            m_session->deleteLater();
-            m_session = nullptr;
+        // 执行失败，重置该 agent 的会话（下次运行重建）
+        m_activeSessionAgents.remove(agent);
+        if (blackboard) {
+            blackboard->append(QStringLiteral("<br><h4 style='color: #dc3545; font-family: Segoe UI, Microsoft YaHei;'>❌ ReAct Agent 任务执行失败或超时。</h4>"));
         }
+        if (AgentSession* sess = m_agentSessions.take(agent)) {
+            sess->deleteLater();
+        }
+    }
+    if (agent == m_currentAgent) {
+        refreshControlState();
     }
 }
 
 void AgentMainWindow::handleResetSession() {
-    if (m_isRunning) return;
+    const QString agent = m_agentCombo->currentText();
+    if (m_runningAgents.contains(agent)) return; // 该 agent 正在跑任务，不能重置
 
-    m_sessionActive = false;
-    m_runBtn->setText(QStringLiteral("⚡ 启动 Agent 任务"));
-    m_runBtn->setEnabled(true);
-    m_taskInputEdit->setEnabled(true);
-    m_taskInputEdit->clear();
-
-    m_resetSessionBtn->setEnabled(false);
-    m_resetSessionBtn->setStyleSheet(QStringLiteral("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8e8e93, stop:1 #636366);"));
-
-    // 恢复配置区
-    m_configPathEdit->setEnabled(true);
-    m_browseBtn->setEnabled(true);
-    m_logPathEdit->setEnabled(true);
-    m_logBrowseBtn->setEnabled(true);
-    m_modeCombo->setEnabled(true);
-    m_modelCombo->setEnabled(m_modeCombo->currentIndex() == 1);
-    m_fetchModelsBtn->setEnabled(m_modeCombo->currentIndex() == 1);
-
-    // 释放 session
-    if (m_session) {
-        m_session->deleteLater();
-        m_session = nullptr;
+    m_activeSessionAgents.remove(agent);
+    if (AgentSession* sess = m_agentSessions.take(agent)) {
+        sess->deleteLater();
     }
-
-    m_logBlackboard->clear();
-    m_logBlackboard->setHtml(QStringLiteral("<h3 style='color: #8e8e93; font-family: Segoe UI, Microsoft YaHei;'>会话已重置。新对话已就绪，请输入您的任务指令并点击启动...</h3>"));
-    
-    qInfo().noquote() << "[AgentMainWindow] 用户手动清空重置了多轮对话会话。";
+    QTextEdit* blackboard = m_agentBlackboards.value(agent);
+    if (blackboard) {
+        blackboard->clear();
+        blackboard->setHtml(QStringLiteral("<h3 style='color: #8e8e93; font-family: Segoe UI, Microsoft YaHei;'>会话已重置。新对话已就绪，请输入您的任务指令并点击发送...</h3>"));
+    }
+    m_taskInputEdit->clear();
+    refreshControlState();
+    mcp_qt::McpLogger::info(QStringLiteral("用户手动清空重置了多轮对话会话。"), QStringLiteral("AgentMainWindow"));
 }
 
 void AgentMainWindow::handleFetchModels() {
@@ -778,24 +1031,122 @@ void AgentMainWindow::handleFetchModels() {
 }
 
 void AgentMainWindow::appendLogHtml(const QString& html) {
-    m_logBlackboard->append(html);
-    m_logBlackboard->verticalScrollBar()->setValue(m_logBlackboard->verticalScrollBar()->maximum());
+    QTextEdit* bb = m_agentBlackboards.value(m_currentAgent);
+    if (!bb && m_blackboardStack) {
+        bb = blackboardForAgent(m_currentAgent);
+    }
+    if (!bb) return;
+    bb->append(html);
+    bb->verticalScrollBar()->setValue(bb->verticalScrollBar()->maximum());
+}
+
+QTextEdit* AgentMainWindow::blackboardForAgent(const QString& agent) {
+    QTextEdit* bb = m_agentBlackboards.value(agent);
+    if (bb) return bb;
+    bb = new QTextEdit(m_blackboardStack);
+    bb->setReadOnly(true);
+    bb->setHtml(QStringLiteral("<h3 style='color: #8e8e93; font-family: Segoe UI, Microsoft YaHei;'>系统空闲中。请在下方输入您的任务指令...</h3>"));
+    m_agentBlackboards[agent] = bb;
+    m_blackboardStack->addWidget(bb);
+    return bb;
+}
+
+void AgentMainWindow::showAgentBlackboard(const QString& agent) {
+    QTextEdit* bb = blackboardForAgent(agent);
+    if (bb) m_blackboardStack->setCurrentWidget(bb);
+}
+
+AgentSession* AgentMainWindow::sessionForAgent(const QString& agent) {
+    AgentSession* sess = m_agentSessions.value(agent);
+    if (sess) return sess;
+
+    sess = new AgentSession(m_host, m_llmBackend, this);
+    m_agentSessions[agent] = sess;
+    QTextEdit* blackboard = blackboardForAgent(agent);
+
+    // 该 agent 的进度 → 其自己的看板（后台继续运行，切换 agent 不中断）
+    connect(sess->executor(), &LlmAgentExecutor::stepProgress, this,
+            [this, agent, blackboard](const QString& type, const QString& content) {
+                handleStepProgress(blackboard, type, content);
+            });
+    // 工具返回 MCP Apps UI → 内嵌渲染
+    connect(sess->executor(), &LlmAgentExecutor::mcpAppContentAvailable, this,
+            &AgentMainWindow::handleMcpAppContent);
+    // 会话结束 → 该 agent 的收尾
+    connect(sess, &AgentSession::finished, this,
+            [this, agent](int code) { handleSessionFinished(agent, code); });
+
+    return sess;
+}
+
+void AgentMainWindow::refreshControlState() {
+    const QString agent = m_agentCombo->currentText();
+    const bool running = m_runningAgents.contains(agent);
+    const bool active = m_activeSessionAgents.contains(agent);
+
+    m_runBtn->setEnabled(!running);
+    m_runBtn->setText(running ? QStringLiteral("⏳ 运行中...") : QStringLiteral("⚡ 发送"));
+    m_taskInputEdit->setEnabled(!running);
+    m_configPathEdit->setEnabled(!running && !active);
+    m_browseBtn->setEnabled(!running && !active);
+    m_logPathEdit->setEnabled(!running && !active);
+    m_logBrowseBtn->setEnabled(!running && !active);
+    m_modeCombo->setEnabled(!running && !active);
+    m_modelCombo->setEnabled(!running && !active);
+    m_fetchModelsBtn->setEnabled(!running && !active);
+    m_resetSessionBtn->setEnabled(!running && active);
+    m_resetSessionBtn->setStyleSheet(active
+        ? QStringLiteral("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff3b30, stop:1 #ff2d55);")
+        : QStringLiteral("background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8e8e93, stop:1 #636366);"));
 }
 
 void AgentMainWindow::loadAndConnectServers(const QString& configPath) {
     if (!m_host) return;
 
     appendLogHtml("<b>[System]</b> 尝试加载 MCP 配置: " + configPath);
-    
-    m_serverListWidget->clear();
+
+    m_allServerList->clear();
     m_host->stop();
     m_host->clearConfig();
-    
+
     if (!m_host->loadConfigFromFile(configPath)) {
         appendLogHtml(QStringLiteral("<div style='color: red;'>加载配置文件失败！</div>"));
-    } else {
-        m_host->start(30000);
+        return;
     }
+
+    // 解析配置里的 "agents" 段（agent → 服务器列表）
+    QMap<QString, QStringList> agents;
+    QFile cfgFile(configPath);
+    if (cfgFile.open(QIODevice::ReadOnly)) {
+        const QJsonObject agentsObj = QJsonDocument::fromJson(cfgFile.readAll()).object()
+                                          .value(QStringLiteral("agents")).toObject();
+        for (auto it = agentsObj.begin(); it != agentsObj.end(); ++it) {
+            QStringList servers;
+            for (const auto& v : it.value().toArray()) servers << v.toString();
+            agents.insert(it.key(), servers);
+        }
+    }
+
+    m_agentCombo->clear();
+    for (const QString& agent : agents.keys()) m_agentCombo->addItem(agent);
+    if (m_agentCombo->count() > 0) m_agentCombo->setCurrentIndex(0);
+
+    if (agents.isEmpty()) {
+        // 兼容单 host：无 agents 段 → 启动全部（loadConfigFromFile 默认全启用）
+        m_host->start(30000);
+        return;
+    }
+
+    // 多 agent：一次灌入注册表（单次 changed → 一次对账）。reconcile 把 McpHost 的
+    // 启用集对账到「所有 agent 服务器集合的并集」，start() 只启动被引用的服务器，
+    // 重叠服务器在并集中只出现一次 → 只建一条连接。
+    m_registry->setAgents(agents);
+    m_host->start(30000);
+    updateAllServerList();
+    updateCurrentAgentMcpCombo();
+    appendLogHtml(QString("<b>[System]</b> 多 agent 模式：%1 个 agent，期望启动服务器 = %2")
+                      .arg(agents.size())
+                      .arg(m_registry->allServers().join(QStringLiteral(", "))));
 }
 
 void AgentMainWindow::handleServerDoubleClicked(QListWidgetItem* item) {

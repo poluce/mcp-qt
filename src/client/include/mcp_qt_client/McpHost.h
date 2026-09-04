@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QJsonArray>
 #include <QMap>
+#include <functional>
 
 namespace mcp_qt {
 
@@ -23,7 +24,6 @@ public:
     bool loadConfigFromFile(const QString& configFilePath);
     bool loadConfigFromJson(const QJsonObject& jsonObj);
     void clearConfig();
-    void addServerConfig(const McpServerConfig& config);
     
     // Starts enabled servers asynchronously. Emits hostReady when done or timeout occurs.
     void start(int timeoutMs = 30000); 
@@ -35,10 +35,20 @@ public:
     bool reloadConfigAndRestart(int timeoutMs = 30000);
 
     // ================= 2. Server Management =================
+    /// 已注册（已连接）的服务器名——与 McpServerManager::serverNames() 语义一致。
+    /// 注意：未启用/未 start 的服务器不在此列；如需配置列表（含未启用）用 configuredServerNames()。
     QStringList serverNames() const;
+    /// 配置中声明的全部服务器名（含未启用的），与 serverNames() 的"已注册"语义区分。
+    QStringList configuredServerNames() const;
     void setServerEnabled(const QString& serverName, bool enabled, bool persist = true);
     void removeServerConfig(const QString& serverName, bool persist = true);
+    /// 登记/更新配置（同名覆盖去重）。仅登记，不启动、不持久化——start() 时才连接。
+    /// 需要"即改即生效 + 持久化"用 addOrUpdateServerConfig()。
+    void addServerConfig(const McpServerConfig& config);
+    /// 更新配置并自动重启该服务器（stop + start），可选持久化到配置文件。
     void addOrUpdateServerConfig(const McpServerConfig& config, bool persist = true);
+    /// 重启指定服务器（从已加载配置重新拉起）。
+    void restartServer(const QString& serverName);
     bool isServerEnabled(const QString& serverName) const;
     
     McpServerState serverState(const QString& serverName) const;
@@ -54,6 +64,7 @@ public:
     McpToolRouter* toolRouter() const { return m_toolRouter; }
     McpPromptRouter* promptRouter() const { return m_promptRouter; }
     McpResourceRouter* resourceRouter() const { return m_resourceRouter; }
+    McpServerManager* manager() const { return m_manager; }
 
     // ================= 4. Diagnostics =================
     QString getDiagnosticReport() const;
@@ -66,6 +77,9 @@ signals:
     void globalPromptsChanged();
     void globalResourcesChanged();
     void errorOccurred(const QString& serverName, const mcp_qt::McpError& error);
+    void inputRequired(const QString& serverName, const QString& requestId,
+                       const QJsonObject& inputRequests, const QString& requestState,
+                       mcp_qt::MrtrReplyCallback replyCallback);
 
 private:
     void handleAllToolsReady();
@@ -78,6 +92,8 @@ private:
     bool persistServerObject(const QString& serverName, const QJsonObject& obj);
     bool persistRemoveServer(const QString& serverName);
     QJsonObject serializeServerConfig(const McpServerConfig& cfg) const;
+    // 读-改-写 mcpServers 配置：allowMissing 时文件缺失则从空对象开始；mutate 返回 false 不写回。
+    bool readWriteConfig(bool allowMissing, const std::function<bool(QJsonObject&)>& mutate);
 
     McpServerManager* m_manager;
     McpToolRouter* m_toolRouter;

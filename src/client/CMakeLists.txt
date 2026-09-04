@@ -26,8 +26,14 @@ add_library(mcp_qt_client STATIC
     src/McpResourceRouter.cpp
     include/mcp_qt_client/McpHost.h
     src/McpHost.cpp
+    include/mcp_qt_client/McpServerView.h
+    src/McpServerView.cpp
+    include/mcp_qt_client/McpLogger.h
+    src/McpLogger.cpp
     include/mcp_qt_client/McpDiagnosticReporter.h
     src/McpDiagnosticReporter.cpp
+    include/mcp_qt_client/es256jwt.h
+    src/es256jwt.cpp
 )
 
 target_include_directories(mcp_qt_client PUBLIC
@@ -43,6 +49,15 @@ target_link_libraries(mcp_qt_client PUBLIC
     Qt6::Core
     Qt6::Network
 )
+
+# ES256 JWT assertion 签名后端：Windows 用系统 CNG（BCrypt，零新增依赖），
+# 非 Windows 沿用仓库既有 OpenSSL 依赖（src/core/mcpoauthclient.cpp 已 include <openssl/sha.h>）。
+if(WIN32)
+    target_link_libraries(mcp_qt_client PRIVATE bcrypt)
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(mcp_qt_client PRIVATE OpenSSL::Crypto)
+endif()
 
 target_compile_features(mcp_qt_client PUBLIC cxx_std_17)
 target_compile_options(mcp_qt_client PRIVATE

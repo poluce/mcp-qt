@@ -1,10 +1,130 @@
 #include "mcp_core/McpClientSession.h"
+#include "mcp_core/McpHeaderEncoding.h"
+#include <cctype>
+#include <set>
 
 namespace mcp {
 
 namespace {
     json notInitializedError() {
-        return {{"code", -32002}, {"message", "Session not initialized"}};
+        // 2026-07-28 错误码分区：客户端本地错误使用 -32900 系列（-32902 = 未初始化）
+        return {{"code", McpClientSession::kErrorNotInitialized}, {"message", "Session not initialized"}};
+    }
+
+    /**
+     * @brief 从结果对象解析 CacheableResult 缓存提示（ttlMs/cacheScope）。
+     */
+    McpCacheHint parseCacheHint(const json& result) {
+        McpCacheHint hint;
+        if (result.is_object()) {
+            if (result.contains("ttlMs") && result["ttlMs"].is_number_integer()) {
+                hint.ttlMs = result["ttlMs"].get<int64_t>();
+            }
+            if (result.contains("cacheScope") && result["cacheScope"].is_string()) {
+                hint.cacheScope = result["cacheScope"].get<std::string>();
+            }
+        }
+        return hint;
+    }
+
+    /**
+     * @brief RFC 9110 HTTP token 语法：[A-Za-z0-9!#$%&'*+.^_`|~-]+
+     *        （控制字符、空白、分隔符均不合法）
+     */
+    bool isValidHttpTokenName(const std::string& name) {
+        if (name.empty()) return false;
+        for (char c : name) {
+            const unsigned char uc = static_cast<unsigned char>(c);
+            const bool tokenChar =
+                (uc >= 'A' && uc <= 'Z') || (uc >= 'a' && uc <= 'z') || (uc >= '0' && uc <= '9') ||
+                uc == '!' || uc == '#' || uc == '$' || uc == '%' || uc == '&' || uc == '\'' ||
+                uc == '*' || uc == '+' || uc == '.' || uc == '^' || uc == '_' || uc == '`' ||
+                uc == '|' || uc == '~' || uc == '-';
+            if (!tokenChar) return false;
+        }
+        return true;
+    }
+
+    static std::string toLowerAscii(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return out;
+    }
+
+    /**
+     * @brief 校验工具 inputSchema 中的 x-mcp-header 注解（2026-07-28 SEP-2243）。
+     *
+     * 合法要求（简化但完整）：
+     *   1. 注解值非空；
+     *   2. 符合 HTTP token 语法（无控制字符/分隔符）；
+     *   3. schema 内大小写不敏感唯一（忽略大小写不得重复）；
+     *   4. 注解参数类型必须为 primitive（integer/string/boolean）；
+     *   5. 静态可达：注解仅出现在 inputSchema.properties.<name> 顶层（properties 链）。
+     * 任一非法即整体判定该工具注解非法（listTools 时剔除并警告）。
+     */
+    bool validateXMcpHeaderAnnotations(const json& schema) {
+        if (!schema.is_object() || !schema.contains("properties") || !schema["properties"].is_object()) {
+            return true; // 无注解 -> 合法
+        }
+        const json& properties = schema["properties"];
+        std::set<std::string> seen; // 小写化注解名
+        for (auto it = properties.begin(); it != properties.end(); ++it) {
+            const json& propSchema = it.value();
+            if (!propSchema.is_object() || !propSchema.contains("x-mcp-header")) continue;
+            if (!propSchema["x-mcp-header"].is_string()) return false;
+            const std::string headerName = propSchema["x-mcp-header"].get<std::string>();
+            if (headerName.empty() || !isValidHttpTokenName(headerName)) return false;
+            const std::string ptype = propSchema.contains("type") && propSchema["type"].is_string()
+                                          ? propSchema["type"].get<std::string>() : std::string();
+            if (ptype != "integer" && ptype != "string" && ptype != "boolean") return false;
+            if (!seen.insert(toLowerAscii(headerName)).second) return false; // 大小写不敏感重复
+        }
+        return true;
+    }
+
+    /**
+     * @brief 从 tool inputSchema 与 arguments 提取 x-mcp-header 注解参数，
+     *        组装为 {"Mcp-Param-<Name>": <编码值>} 请求头 map。
+     *        仅处理通过校验的注解（非空、token 语法、primitive、静态可达、唯一）。
+     */
+    std::map<std::string, std::string> collectXMcpHeaders(const json& schema, const json& args) {
+        std::map<std::string, std::string> headers;
+        if (!schema.is_object() || !schema.contains("properties") || !schema["properties"].is_object()) {
+            return headers;
+        }
+        const json& properties = schema["properties"];
+        std::set<std::string> seen; // 小写化注解名，大小写不敏感唯一
+        for (auto it = properties.begin(); it != properties.end(); ++it) {
+            const std::string& propName = it.key();
+            const json& propSchema = it.value();
+            if (!propSchema.is_object() || !propSchema.contains("x-mcp-header")) continue;
+            if (!propSchema["x-mcp-header"].is_string()) continue;
+            const std::string headerName = propSchema["x-mcp-header"].get<std::string>();
+            if (headerName.empty() || !isValidHttpTokenName(headerName)) continue;
+            const std::string ptype = propSchema.contains("type") && propSchema["type"].is_string()
+                                          ? propSchema["type"].get<std::string>() : std::string();
+            if (ptype != "integer" && ptype != "string" && ptype != "boolean") continue;
+            if (!seen.insert(toLowerAscii(headerName)).second) continue; // 重复注解跳过
+            if (!args.is_object() || !args.contains(propName)) continue;
+            const json& val = args[propName];
+            std::string valueStr;
+            if (val.is_string()) {
+                valueStr = val.get<std::string>();
+            } else if (val.is_boolean()) {
+                valueStr = val.get<bool>() ? "true" : "false";
+            } else if (val.is_number_integer()) {
+                valueStr = std::to_string(val.get<int64_t>());
+            } else if (val.is_number_unsigned()) {
+                valueStr = std::to_string(val.get<uint64_t>());
+            } else {
+                continue; // 非 primitive 值无法编码
+            }
+            headers["Mcp-Param-" + headerName] = mcpHeaderEncodeValue(valueStr);
+        }
+        return headers;
     }
 
     McpTrafficKind detectTrafficKind(const json& j) {
@@ -15,6 +135,52 @@ namespace {
             return McpTrafficKind::Notification;
         }
         return McpTrafficKind::Unknown;
+    }
+
+    /**
+     * @brief Normalize the handler's reply into a spec-conformant InputResponses map.
+     *
+     * The official 2026-07-28 InputResponses object is a map whose keys match the
+     * InputRequests keys (values are ElicitResult / CreateMessageResult / ListRootsResult).
+     *
+     * Two accepted shapes from the application handler:
+     *   1. Already keyed by request id (top-level keys match inputRequests keys) -> used as-is.
+     *   2. A single input request was present and the handler returned flat {field: value}
+     *      form data -> wrapped into { "<key>": { "action": "accept", "content": {...} } }.
+     */
+    json normalizeInputResponses(const json& inputRequests, const json& raw) {
+        if (!raw.is_object()) {
+            return raw.is_null() ? json::object() : json{{"value", raw}};
+        }
+        if (inputRequests.is_object() && !inputRequests.empty()) {
+            bool topLevelMatches = true;
+            for (auto it = inputRequests.begin(); it != inputRequests.end(); ++it) {
+                if (!raw.contains(it.key())) {
+                    topLevelMatches = false;
+                    break;
+                }
+            }
+            if (topLevelMatches) return raw;
+
+            if (inputRequests.size() == 1) {
+                const std::string key = inputRequests.begin().key();
+                const json& req = inputRequests.begin().value();
+                std::string method = req.is_object() && req.contains("method") && req["method"].is_string()
+                                         ? req["method"].get<std::string>()
+                                         : std::string();
+                json wrapped;
+                if (method == "elicitation/create") {
+                    wrapped = {{"action", "accept"}, {"content", raw}};
+                } else {
+                    wrapped = raw;
+                }
+                json result;
+                result[key] = wrapped;
+                return result;
+            }
+        }
+        // Cannot determine mapping; pass through (server SHOULD ignore unknown keys).
+        return raw;
     }
 }
 
@@ -124,6 +290,8 @@ int64_t McpClientSession::sendRequest(const std::string& method, const json& par
         id = m_nextId++;
         m_lastRequestId.store(id);
         m_pendingRequests[id] = PendingRequest{
+            method,
+            params,
             std::move(callback),
             std::chrono::steady_clock::now()
         };
@@ -138,6 +306,9 @@ int64_t McpClientSession::sendRequest(const std::string& method, const json& par
         {"method", method},
         {"params", params}
     };
+
+    // 2026-07-28 无状态模式下自动充实 self-contained _meta 元数据（兼容标准命名空间全称）
+    injectStatelessMeta(requestMsg["params"]);
 
     if (hasProgress) {
         if (!requestMsg["params"].is_object()) {
@@ -217,11 +388,15 @@ void McpClientSession::handleResponse(const json& responseJson) {
     }
 
     ResponseCallback cb;
+    std::string reqMethod;
+    json reqParams;
     bool found = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_pendingRequests.find(id);
         if (it != m_pendingRequests.end()) {
+            reqMethod = std::move(it->second.method);
+            reqParams = std::move(it->second.params);
             cb = std::move(it->second.callback);
             m_pendingRequests.erase(it);
             found = true;
@@ -238,6 +413,79 @@ void McpClientSession::handleResponse(const json& responseJson) {
     if (cb) {
         json result = responseJson.contains("result") ? responseJson["result"] : json::object();
         json error = responseJson.contains("error") ? responseJson["error"] : json::object();
+
+        // MCP 2026-07-28 MRTR: 拦截 resultType/status: "input_required" 挂起状态。
+        // 注意：tasks/get 的 DetailedTask 也携带 status: "input_required"（SEP-2663），
+        // 但其 resultType 为 "complete"，属任务状态而非 MRTR 挂起——必须按请求方法排除
+        // tasks 家族，否则任务轮询会被误判为 MRTR 并报 -32901。
+        bool isTaskMethod = reqMethod.rfind("tasks/", 0) == 0;
+        bool isInputRequired = result.is_object() && !isTaskMethod &&
+            ((result.contains("status") && result["status"] == "input_required") ||
+             (result.contains("resultType") && result["resultType"] == "input_required"));
+
+        if (isInputRequired) {
+            MrtrInputHandler mrtrHandler;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                mrtrHandler = m_mrtrHandler;
+            }
+            if (mrtrHandler) {
+                // 规范 InputRequests map: { key: { method, params } } (SEP-2322)
+                json inputRequests = json::object();
+                if (result.contains("inputRequests") && result["inputRequests"].is_object()) {
+                    inputRequests = result["inputRequests"];
+                } else if (result.contains("inputSchema") && result["inputSchema"].is_object()) {
+                    // 兼容旧式 inputSchema 字段：包装为单个 elicitation 请求
+                    inputRequests = json{
+                        {"input", {
+                            {"method", "elicitation/create"},
+                            {"params", {
+                                {"mode", "form"},
+                                {"message", "Server requests additional input"},
+                                {"requestedSchema", result["inputSchema"]}
+                            }}
+                        }}
+                    };
+                }
+
+                // 客户端 MUST NOT 解析/修改 requestState；仅在重发时原样回显
+                std::string requestState;
+                if (result.contains("requestState") && result["requestState"].is_string()) {
+                    requestState = result["requestState"].get<std::string>();
+                }
+
+                log(LogLevel::Info, "Intercepted MRTR input_required status for request id=" + std::to_string(id));
+                std::weak_ptr<McpClientSession> weakSelf = shared_from_this();
+                mrtrHandler(std::to_string(id), inputRequests, reqParams, requestState,
+                            [weakSelf, reqMethod, reqParams, inputRequests, requestState, cb](const json& userInputs) {
+                    if (auto self = weakSelf.lock()) {
+                        json inputResponses = normalizeInputResponses(inputRequests, userInputs);
+                        self->resendMrtrRequest(reqMethod, reqParams, inputResponses, requestState, cb);
+                    }
+                });
+                return;
+            }
+
+            // 无 MRTR handler：无法满足 input_required，回上层报错避免请求悬空
+            // （-32901 = 客户端本地错误：MRTR 无 handler；见 kErrorCancelled）
+            cb(result, {{"code", kErrorCancelled},
+                        {"message", "MRTR input_required received but no MrtrInputHandler is registered"}});
+            return;
+        }
+
+        // MCP 2026-07-28 通用 resultType 语义（SEP-2575）：
+        //   所有结果 MUST 携带 resultType；缺省视为 complete；未知值视为无效。
+        //   "task"（SEP-2663 Tasks 扩展）为合法值：tools/call 可返回 CreateTaskResult。
+        if (result.is_object() && result.contains("resultType") && result["resultType"].is_string()) {
+            const std::string rt = result["resultType"].get<std::string>();
+            if (!rt.empty() && rt != kResultTypeComplete && rt != kResultTypeInputRequired && rt != kResultTypeTask) {
+                log(LogLevel::Warning, "Unknown resultType '" + rt + "' in response for id=" + std::to_string(id));
+                cb(json::object(), {{"code", kErrorUnknownResultType},
+                                    {"message", "Unknown resultType: " + rt}});
+                return;
+            }
+        }
+
         cb(result, error);
     }
 }
@@ -245,6 +493,48 @@ void McpClientSession::handleResponse(const json& responseJson) {
 void McpClientSession::handleNotification(const json& notificationJson) {
     std::string method = notificationJson["method"].get<std::string>();
     json params = notificationJson.contains("params") ? notificationJson["params"] : json::object();
+
+    // MCP 2026-07-28 subscriptions/listen (SEP-2330):
+    // 从 _meta."io.modelcontextprotocol/subscriptionId" 提取 subscriptionId。
+    int64_t subscriptionId = 0;
+    if (params.is_object() && params.contains("_meta") && params["_meta"].is_object()) {
+        const auto& meta = params["_meta"];
+        if (meta.contains("io.modelcontextprotocol/subscriptionId")) {
+            const auto& sid = meta["io.modelcontextprotocol/subscriptionId"];
+            if (sid.is_number_integer()) {
+                subscriptionId = sid.get<int64_t>();
+            } else if (sid.is_string()) {
+                try {
+                    subscriptionId = std::stoll(sid.get<std::string>());
+                } catch (...) {
+                    // Ignore parsing error
+                }
+            }
+        }
+    }
+
+    // acknowledged：记录服务器同意的 notifications 子集（subscriptionId -> filter）
+    if (method == "notifications/subscriptions/acknowledged") {
+        json accepted = params.contains("notifications") ? params["notifications"] : json();
+        if (subscriptionId != 0) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_subscriptions[subscriptionId] = accepted;
+        }
+        log(LogLevel::Info, "subscriptions/acknowledged: subscriptionId=" + std::to_string(subscriptionId));
+    }
+
+    // 订阅通知派发：acknowledged 与其它流通知（resources/updated 等）一并
+    // 派发给 setSubscriptionListener 注册的 listener（带 subscriptionId）。
+    if (subscriptionId != 0) {
+        SubscriptionListener subListener;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            subListener = m_subscriptionListener;
+        }
+        if (subListener) {
+            subListener(subscriptionId, method, params);
+        }
+    }
 
     if (method == "notifications/progress") {
         int64_t progressTokenId = 0;
@@ -343,6 +633,22 @@ void McpClientSession::handleRequestFromServer(const json& requestJson) {
 
 void McpClientSession::initialize(const std::string& clientName, const std::string& clientVersion,
                                   std::function<void(bool success, const json& serverInfo)> callback) {
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_clientName = clientName;
+        m_clientVersion = clientVersion;
+    }
+    if (m_statelessMode) {
+        // 2026-07-28 已移除 initialize 握手（SEP-2575/2567）：stateless 模式下
+        // initialize 方法不存在，应返回标准 JSON-RPC Method not found（-32601），
+        // 而非 -32022 UnsupportedProtocolVersionError（那是服务器对 legacy initialize
+        // 的协议协商错误）。调用方应改用 server/discover + 直接 RPC。
+        callback(false, json{
+            {"code", -32601},
+            {"message", "Method not found: initialize"}
+        });
+        return;
+    }
     SessionState expected = SessionState::Uninitialized;
     if (!m_state.compare_exchange_strong(expected, SessionState::Initializing)) {
         json err = {
@@ -385,7 +691,7 @@ void McpClientSession::initialize(const std::string& clientName, const std::stri
             if (!versionSupported) {
                 self->m_state = SessionState::Uninitialized;
                 json verErr = {
-                    {"code", -32002},
+                    {"code", kErrorNotInitialized},
                     {"message", "Version Mismatch: Server returned unsupported version " + serverVer}
                 };
                 callback(false, verErr);
@@ -431,7 +737,7 @@ void McpClientSession::initialize(const std::string& clientName, const std::stri
 }
 
 void McpClientSession::shutdown(std::function<void(bool success)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false);
         return;
     }
@@ -446,6 +752,44 @@ void McpClientSession::shutdown(std::function<void(bool success)> callback) {
     });
 }
 
+void McpClientSession::discoverServer(std::function<void(const McpServerDiscovery& info, const json& error)> callback) {
+    // server/discover 是 bootstrap RPC（2026-07-28），无需 initialize 握手即可发送。
+    // stateless 模式下 isReady() 恒为 true；legacy 模式下也允许先 discover 再初始化。
+    json params = json::object();
+    sendRequest("server/discover", params, [callback](const json& result, const json& error) {
+        McpServerDiscovery info;
+        if (!error.empty()) {
+            callback(info, error);
+            return;
+        }
+        if (result.contains("supportedVersions") && result["supportedVersions"].is_array()) {
+            for (const auto& v : result["supportedVersions"]) {
+                if (v.is_string()) info.supportedVersions.push_back(v.get<std::string>());
+            }
+        }
+        if (result.contains("capabilities")) info.capabilities = result["capabilities"];
+        if (result.contains("_meta") && result["_meta"].is_object() &&
+            result["_meta"].contains("io.modelcontextprotocol/serverInfo")) {
+            info.serverInfo = result["_meta"]["io.modelcontextprotocol/serverInfo"];
+        } else if (result.contains("serverInfo")) {
+            info.serverInfo = result["serverInfo"];
+        }
+        if (result.contains("instructions") && result["instructions"].is_string()) {
+            info.instructions = result["instructions"].get<std::string>();
+        }
+        if (result.contains("resultType") && result["resultType"].is_string()) {
+            info.resultType = result["resultType"].get<std::string>();
+        }
+        if (result.contains("ttlMs") && result["ttlMs"].is_number_integer()) {
+            info.ttlMs = result["ttlMs"].get<int64_t>();
+        }
+        if (result.contains("cacheScope") && result["cacheScope"].is_string()) {
+            info.cacheScope = result["cacheScope"].get<std::string>();
+        }
+        callback(info, json::object());
+    });
+}
+
 void McpClientSession::listTools(std::function<void(const std::vector<McpTool>& tools, const json& error)> callback) {
     listTools("", [callback](const std::vector<McpTool>& tools, const std::string&, const json& error) {
         callback(tools, error);
@@ -453,7 +797,7 @@ void McpClientSession::listTools(std::function<void(const std::vector<McpTool>& 
 }
 
 void McpClientSession::listTools(const std::string& cursor, std::function<void(const std::vector<McpTool>& tools, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback({}, "", notInitializedError());
         return;
     }
@@ -461,7 +805,7 @@ void McpClientSession::listTools(const std::string& cursor, std::function<void(c
     if (!cursor.empty()) {
         params["cursor"] = cursor;
     }
-    sendRequest("tools/list", params, [callback](const json& result, const json& error) {
+    sendRequest("tools/list", params, [this, callback](const json& result, const json& error) {
         if (!error.empty()) {
             callback({}, "", error);
         } else {
@@ -471,7 +815,14 @@ void McpClientSession::listTools(const std::string& cursor, std::function<void(c
             if (result.contains("tools") && result["tools"].is_array()) {
                 for (const auto& item : result["tools"]) {
                     try {
-                        toolsList.push_back(item.get<McpTool>());
+                        McpTool tool = item.get<McpTool>();
+                        // 2026-07-28 x-mcp-header (SEP-2243)：非法注解的工具从结果中剔除
+                        //（保留工具本身可用性，仅不暴露注解参数）。
+                        if (validateXMcpHeaderAnnotations(tool.inputSchema)) {
+                            toolsList.push_back(std::move(tool));
+                        } else {
+                            log(LogLevel::Warning, "Tool '" + tool.name + "' dropped from tools/list: invalid x-mcp-header annotation");
+                        }
                     } catch (...) {
                         parseOk = false;
                     }
@@ -483,6 +834,13 @@ void McpClientSession::listTools(const std::string& cursor, std::function<void(c
             if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
                 nextCursor = result["nextCursor"].get<std::string>();
             }
+            // 填充工具 schema 缓存（callTool 时提取 x-mcp-header 请求头用）
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                for (const auto& t : toolsList) {
+                    m_toolCache[t.name] = t;
+                }
+            }
             callback(toolsList, nextCursor, json::object());
         }
     });
@@ -491,10 +849,27 @@ void McpClientSession::listTools(const std::string& cursor, std::function<void(c
 void McpClientSession::callTool(const std::string& name, const json& arguments,
                                 std::function<void(const json& content, const json& error)> callback,
                                 ProgressCallback progressCallback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
+
+    // 2026-07-28 x-mcp-header (SEP-2243)：若工具 schema 缓存中存在该工具，
+    // 从 arguments 提取带 x-mcp-header 注解的参数值，编码为 Mcp-Param-{Name} 请求头。
+    McpTool cachedTool;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_toolCache.find(name);
+        if (it != m_toolCache.end()) {
+            cachedTool = it->second;
+        }
+    }
+    if (!cachedTool.name.empty() && cachedTool.inputSchema.is_object()) {
+        auto headers = collectXMcpHeaders(cachedTool.inputSchema, arguments);
+        // 始终显式设置（空 map 即清空），避免上一次调用的 header 泄漏到本次请求
+        m_transport->setExtraRequestHeaders(headers);
+    }
+
     json params = {
         {"name", name},
         {"arguments", arguments}
@@ -516,7 +891,7 @@ void McpClientSession::listResources(std::function<void(const json& result, cons
 }
 
 void McpClientSession::listResources(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), "", notInitializedError());
         return;
     }
@@ -538,7 +913,7 @@ void McpClientSession::listResources(const std::string& cursor, std::function<vo
 }
 
 void McpClientSession::readResource(const std::string& uri, std::function<void(const json& result, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -551,7 +926,7 @@ void McpClientSession::readResource(const std::string& uri, std::function<void(c
 }
 
 void McpClientSession::subscribeResource(const std::string& uri, std::function<void(bool success, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false, notInitializedError());
         return;
     }
@@ -568,7 +943,7 @@ void McpClientSession::subscribeResource(const std::string& uri, std::function<v
 }
 
 void McpClientSession::unsubscribeResource(const std::string& uri, std::function<void(bool success, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(false, notInitializedError());
         return;
     }
@@ -591,7 +966,7 @@ void McpClientSession::listPrompts(std::function<void(const json& result, const 
 }
 
 void McpClientSession::listPrompts(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), "", notInitializedError());
         return;
     }
@@ -613,7 +988,7 @@ void McpClientSession::listPrompts(const std::string& cursor, std::function<void
 }
 
 void McpClientSession::getPrompt(const std::string& name, const json& arguments, std::function<void(const json& result, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -640,7 +1015,7 @@ void McpClientSession::cancelRequest(int64_t requestId) {
     }
     if (cb) {
         json cancelErr = {
-            {"code", -32000},
+            {"code", kErrorCancelled},
             {"message", "Request cancelled locally"}
         };
         cb(json::object(), cancelErr);
@@ -673,42 +1048,12 @@ void McpClientSession::checkRequestTimeouts(std::chrono::milliseconds timeoutLim
         log(LogLevel::Warning, "Request timed out: id=" + std::to_string(pair.first));
         if (pair.second) {
             json timeoutErr = {
-                {"code", -32001},
+                {"code", kErrorTimeout},
                 {"message", "Request timeout"}
             };
             pair.second(json::object(), timeoutErr);
         }
     }
-}
-
-bool McpClientSession::initializeSync(const std::string& clientName, const std::string& clientVersion,
-                                      json* serverInfoOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    initialize(clientName, clientVersion, [pr](bool success, const json& info) {
-        pr->set_value({success, info});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (serverInfoOut) *serverInfoOut = res.second;
-        return res.first;
-    }
-    if (serverInfoOut) {
-        *serverInfoOut = {{"code", -32001}, {"message", "Synchronous initialize timed out"}};
-    }
-    return false;
-}
-
-bool McpClientSession::shutdownSync(std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<bool>>();
-    auto fut = pr->get_future();
-    shutdown([pr](bool success) {
-        pr->set_value(success);
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        return fut.get();
-    }
-    return false;
 }
 
 std::vector<McpTool> McpClientSession::listToolsSync(std::chrono::milliseconds timeout, json* errorOut) {
@@ -722,182 +1067,8 @@ std::vector<McpTool> McpClientSession::listToolsSync(std::chrono::milliseconds t
         if (errorOut) *errorOut = res.second;
         return res.first;
     }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listTools timed out"}};
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous listTools timed out"}};
     return {};
-}
-
-std::vector<McpTool> McpClientSession::listToolsSync(const std::string& cursor, std::string* nextCursorOut,
-                                                     std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListToolsResult {
-        std::vector<McpTool> tools;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListToolsResult>>();
-    auto fut = pr->get_future();
-    listTools(cursor, [pr](const std::vector<McpTool>& tools, const std::string& nextCursor, const json& error) {
-        pr->set_value({tools, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.tools;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listTools with cursor timed out"}};
-    return {};
-}
-
-json McpClientSession::callToolSync(const std::string& name, const json& arguments,
-                                    json* errorOut, std::chrono::milliseconds timeout,
-                                    ProgressCallback progressCallback) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    callTool(name, arguments, [pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    }, std::move(progressCallback));
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous callTool timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listResourcesSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    listResources([pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listResources timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listResourcesSync(const std::string& cursor, std::string* nextCursorOut,
-                                         std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListResourcesResult {
-        json result;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListResourcesResult>>();
-    auto fut = pr->get_future();
-    listResources(cursor, [pr](const json& result, const std::string& nextCursor, const json& error) {
-        pr->set_value({result, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listResources with cursor timed out"}};
-    return json::object();
-}
-
-json McpClientSession::readResourceSync(const std::string& uri, json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    readResource(uri, [pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous readResource timed out"}};
-    return json::object();
-}
-
-bool McpClientSession::subscribeResourceSync(const std::string& uri, json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    subscribeResource(uri, [pr](bool success, const json& error) {
-        pr->set_value({success, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous subscribeResource timed out"}};
-    return false;
-}
-
-bool McpClientSession::unsubscribeResourceSync(const std::string& uri, json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    unsubscribeResource(uri, [pr](bool success, const json& error) {
-        pr->set_value({success, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous unsubscribeResource timed out"}};
-    return false;
-}
-
-json McpClientSession::listPromptsSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    listPrompts([pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listPrompts timed out"}};
-    return json::object();
-}
-
-json McpClientSession::listPromptsSync(const std::string& cursor, std::string* nextCursorOut,
-                                       std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListPromptsResult {
-        json result;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListPromptsResult>>();
-    auto fut = pr->get_future();
-    listPrompts(cursor, [pr](const json& result, const std::string& nextCursor, const json& error) {
-        pr->set_value({result, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.result;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listPrompts with cursor timed out"}};
-    return json::object();
-}
-
-json McpClientSession::getPromptSync(const std::string& name, const json& arguments,
-                                     json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    getPrompt(name, arguments, [pr](const json& result, const json& error) {
-        pr->set_value({result, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous getPrompt timed out"}};
-    return json::object();
 }
 
 int64_t McpClientSession::sendRequestRaw(const std::string& method, const std::string& paramsJson, RawResponseCallback callback) {
@@ -933,28 +1104,18 @@ void McpClientSession::callToolRaw(const std::string& name, const std::string& a
     });
 }
 
-std::string McpClientSession::callToolSyncRaw(const std::string& name, const std::string& argumentsJson,
-                                              std::string* errorJsonOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<std::string, std::string>>>();
-    auto fut = pr->get_future();
-    callToolRaw(name, argumentsJson, [pr](const std::string& res, const std::string& err) {
-        pr->set_value({res, err});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorJsonOut) *errorJsonOut = res.second;
-        return res.first;
-    }
-    if (errorJsonOut) *errorJsonOut = "{\"code\":-32001,\"message\":\"Synchronous callToolRaw timed out\"}";
-    return "{}";
-}
-
 // ==========================================
 // Ping
 // ==========================================
 
 void McpClientSession::ping(std::function<void(bool success, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (modernMode()) {
+        // MCP 2026-07-28 已移除 ping 方法（SEP-2575/2567）
+        log(LogLevel::Warning, "ping removed in 2026-07-28; Method not found");
+        callback(false, {{"code", -32601}, {"message", "Method not found: ping"}});
+        return;
+    }
+    if (!isReady()) {
         callback(false, notInitializedError());
         return;
     }
@@ -965,21 +1126,6 @@ void McpClientSession::ping(std::function<void(bool success, const json& error)>
             callback(true, json::object());
         }
     });
-}
-
-bool McpClientSession::pingSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
-    auto fut = pr->get_future();
-    ping([pr](bool success, const json& error) {
-        pr->set_value({success, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous ping timed out"}};
-    return false;
 }
 
 // ==========================================
@@ -993,7 +1139,7 @@ void McpClientSession::listResourceTemplates(std::function<void(const std::vecto
 }
 
 void McpClientSession::listResourceTemplates(const std::string& cursor, std::function<void(const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback({}, "", notInitializedError());
         return;
     }
@@ -1028,49 +1174,12 @@ void McpClientSession::listResourceTemplates(const std::string& cursor, std::fun
     });
 }
 
-std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(std::chrono::milliseconds timeout, json* errorOut) {
-    auto pr = std::make_shared<std::promise<std::pair<std::vector<McpResourceTemplate>, json>>>();
-    auto fut = pr->get_future();
-    listResourceTemplates([pr](const std::vector<McpResourceTemplate>& templates, const json& error) {
-        pr->set_value({templates, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listResourceTemplates timed out"}};
-    return {};
-}
-
-std::vector<McpResourceTemplate> McpClientSession::listResourceTemplatesSync(const std::string& cursor, std::string* nextCursorOut,
-                                                                             std::chrono::milliseconds timeout, json* errorOut) {
-    struct ListTemplatesResult {
-        std::vector<McpResourceTemplate> templates;
-        std::string nextCursor;
-        json error;
-    };
-    auto pr = std::make_shared<std::promise<ListTemplatesResult>>();
-    auto fut = pr->get_future();
-    listResourceTemplates(cursor, [pr](const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const json& error) {
-        pr->set_value({templates, nextCursor, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (nextCursorOut) *nextCursorOut = res.nextCursor;
-        if (errorOut) *errorOut = res.error;
-        return res.templates;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous listResourceTemplates with cursor timed out"}};
-    return {};
-}
-
 // ==========================================
 // Completion (auto-complete)
 // ==========================================
 
 void McpClientSession::complete(const json& ref, const json& argument, std::function<void(const json& completion, const json& error)> callback) {
-    if (m_state != SessionState::Initialized) {
+    if (!isReady()) {
         callback(json::object(), notInitializedError());
         return;
     }
@@ -1083,27 +1192,14 @@ void McpClientSession::complete(const json& ref, const json& argument, std::func
     });
 }
 
-json McpClientSession::completeSync(const json& ref, const json& argument,
-                                    json* errorOut, std::chrono::milliseconds timeout) {
-    auto pr = std::make_shared<std::promise<std::pair<json, json>>>();
-    auto fut = pr->get_future();
-    complete(ref, argument, [pr](const json& completion, const json& error) {
-        pr->set_value({completion, error});
-    });
-    if (fut.wait_for(timeout) == std::future_status::ready) {
-        auto res = fut.get();
-        if (errorOut) *errorOut = res.second;
-        return res.first;
-    }
-    if (errorOut) *errorOut = {{"code", -32001}, {"message", "Synchronous complete timed out"}};
-    return json::object();
-}
-
 // ==========================================
 // Sampling (双向: 服务端请求客户端推理)
 // ==========================================
 
 void McpClientSession::setSamplingHandler(SamplingHandler handler) {
+    if (modernMode()) {
+        log(LogLevel::Warning, "Feature 'sampling' is deprecated in MCP 2026-07-28 specification but maintained for backwards compatibility.");
+    }
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_samplingHandler = std::move(handler);
@@ -1176,12 +1272,318 @@ void McpClientSession::setElicitationHandler(ElicitationHandler handler) {
 // ==========================================
 
 void McpClientSession::setRootsProvider(RootsProvider provider) {
+    if (modernMode()) {
+        log(LogLevel::Warning, "Feature 'roots' is deprecated in MCP 2026-07-28 specification but maintained for backwards compatibility.");
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_rootsProvider = std::move(provider);
 }
 
+void McpClientSession::setMrtrHandler(MrtrInputHandler handler) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_mrtrHandler = std::move(handler);
+}
+
+void McpClientSession::injectStatelessMeta(json& params) {
+    if (modernMode()) {
+        if (!params.is_object()) {
+            params = json::object();
+        }
+        if (!params.contains("_meta") || !params["_meta"].is_object()) {
+            params["_meta"] = json::object();
+        }
+        auto& meta = params["_meta"];
+        std::string ver = !m_overrideProtocolVersion.empty() ? m_overrideProtocolVersion
+            : (m_negotiatedProtocolVersion.empty() ? "2026-07-28" : m_negotiatedProtocolVersion);
+        json clientInfoObj = {{"name", m_clientName}, {"version", m_clientVersion}};
+
+        meta["protocolVersion"] = ver;
+        meta["io.modelcontextprotocol/protocolVersion"] = ver;
+        meta["clientInfo"] = clientInfoObj;
+        meta["io.modelcontextprotocol/clientInfo"] = clientInfoObj;
+        meta["capabilities"] = m_capabilities;
+        meta["io.modelcontextprotocol/clientCapabilities"] = m_capabilities;
+
+        // 2026-07-28 per-request logLevel（SEP-2577）：客户端可选地声明希望接收的日志级别
+        if (!m_requestLogLevel.empty()) {
+            meta["logLevel"] = m_requestLogLevel;
+            meta["io.modelcontextprotocol/logLevel"] = m_requestLogLevel;
+        }
+    }
+}
+
+void McpClientSession::resendMrtrRequest(const std::string& method, json params,
+                                         const json& inputResponses, const std::string& requestState,
+                                         ResponseCallback callback) {
+    if (!params.is_object()) {
+        params = json::object();
+    }
+    // 规范 wire 格式（SEP-2322 / InputResponseRequestParams）:
+    //   inputResponses 与 requestState 位于 params 顶层（与 name/arguments/_meta 平级）
+    params["inputResponses"] = inputResponses;
+    if (!requestState.empty()) {
+        params["requestState"] = requestState;
+    }
+    log(LogLevel::Info, "Resending MRTR request method=" + method
+        + " with top-level inputResponses" + (requestState.empty() ? "" : " and requestState"));
+    // 新的 JSON-RPC id 由 sendRequest 自动分配（MUST differ from the initial request）
+    sendRequest(method, params, std::move(callback));
+}
+
+// ==========================================
+// Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）
+// ==========================================
+
+void McpClientSession::getTask(const std::string& taskId, std::function<void(const McpTask& task, const json& error)> callback) {
+    json params = {{"taskId", taskId}};
+    sendRequest("tasks/get", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback(McpTask{}, error);
+            return;
+        }
+        callback(McpTask::fromJson(result), json::object());
+    });
+}
+
+void McpClientSession::updateTask(const std::string& taskId, const json& inputResponses,
+                                  std::function<void(bool success, const json& error)> callback) {
+    json params = {{"taskId", taskId}, {"inputResponses", inputResponses}};
+    sendRequest("tasks/update", params, [callback](const json& result, const json& error) {
+        (void)result;  // ack-only：成功时为空结果
+        callback(error.empty(), error);
+    });
+}
+
+void McpClientSession::cancelTask(const std::string& taskId, std::function<void(bool success, const json& error)> callback) {
+    json params = {{"taskId", taskId}};
+    sendRequest("tasks/cancel", params, [callback](const json& result, const json& error) {
+        (void)result;  // ack-only：成功时为空结果
+        callback(error.empty(), error);
+    });
+}
+
+McpTask McpClientSession::getTaskSync(const std::string& taskId, std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<McpTask, json>>>();
+    auto fut = pr->get_future();
+    getTask(taskId, [pr](const McpTask& task, const json& error) {
+        pr->set_value({task, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous getTask timed out"}};
+    return McpTask{};
+}
+
+bool McpClientSession::updateTaskSync(const std::string& taskId, const json& inputResponses,
+                                      std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
+    auto fut = pr->get_future();
+    updateTask(taskId, inputResponses, [pr](bool success, const json& error) {
+        pr->set_value({success, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous updateTask timed out"}};
+    return false;
+}
+
+bool McpClientSession::cancelTaskSync(const std::string& taskId, std::chrono::milliseconds timeout, json* errorOut) {
+    auto pr = std::make_shared<std::promise<std::pair<bool, json>>>();
+    auto fut = pr->get_future();
+    cancelTask(taskId, [pr](bool success, const json& error) {
+        pr->set_value({success, error});
+    });
+    if (fut.wait_for(timeout) == std::future_status::ready) {
+        auto res = fut.get();
+        if (errorOut) *errorOut = res.second;
+        return res.first;
+    }
+    if (errorOut) *errorOut = {{"code", kErrorTimeout}, {"message", "Synchronous cancelTask timed out"}};
+    return false;
+}
+
 void McpClientSession::notifyRootsListChanged() {
+    if (modernMode()) {
+        // MCP 2026-07-28 已移除 roots/list_changed 通知（SEP-2575/2567）：
+        // 不发送，仅记录日志警告。
+        log(LogLevel::Warning, "notifications/roots/list_changed removed in 2026-07-28; notification suppressed");
+        return;
+    }
     sendNotification("notifications/roots/list_changed", json::object());
+}
+
+// ==========================================
+// Subscriptions (MCP 2026-07-28, SEP-2330: subscriptions/listen)
+// ==========================================
+
+void McpClientSession::listenSubscriptions(const json& filter, std::function<void(bool success, const std::string& error)> callback) {
+    if (!isReady()) {
+        if (callback) callback(false, notInitializedError().dump());
+        return;
+    }
+    json params = json::object();
+    params["notifications"] = filter;
+    sendRequest("subscriptions/listen", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            if (callback) callback(false, error.dump());
+            return;
+        }
+        if (callback) callback(true, "");
+    });
+}
+
+void McpClientSession::cancelSubscription(int64_t requestId) {
+    log(LogLevel::Info, "cancelSubscription: requestId=" + std::to_string(requestId));
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_subscriptions.erase(requestId);
+    }
+    // stdio：发送 notifications/cancelled；
+    // HTTP：关闭流由 transport 负责（本层仅记录）。
+    json params = {{"requestId", requestId}};
+    sendNotification("notifications/cancelled", params);
+}
+
+void McpClientSession::setSubscriptionListener(SubscriptionListener listener) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_subscriptionListener = std::move(listener);
+}
+
+// ==========================================
+// CacheableResult (MCP 2026-07-28): list/read 结果携带 ttlMs/cacheScope
+// ==========================================
+
+void McpClientSession::listToolsWithCache(const std::string& cursor, std::function<void(const std::vector<McpTool>& tools, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback) {
+    if (!isReady()) {
+        callback({}, "", McpCacheHint{}, notInitializedError());
+        return;
+    }
+    json params = json::object();
+    if (!cursor.empty()) {
+        params["cursor"] = cursor;
+    }
+    sendRequest("tools/list", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback({}, "", McpCacheHint{}, error);
+        } else {
+            std::vector<McpTool> toolsList;
+            std::string nextCursor;
+            bool parseOk = true;
+            if (result.contains("tools") && result["tools"].is_array()) {
+                for (const auto& item : result["tools"]) {
+                    try {
+                        toolsList.push_back(item.get<McpTool>());
+                    } catch (...) {
+                        parseOk = false;
+                    }
+                }
+            }
+            if (!parseOk) {
+                toolsList.clear();
+            }
+            if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
+                nextCursor = result["nextCursor"].get<std::string>();
+            }
+            callback(toolsList, nextCursor, parseCacheHint(result), json::object());
+        }
+    });
+}
+
+void McpClientSession::listResourcesWithCache(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback) {
+    if (!isReady()) {
+        callback(json::object(), "", McpCacheHint{}, notInitializedError());
+        return;
+    }
+    json params = json::object();
+    if (!cursor.empty()) {
+        params["cursor"] = cursor;
+    }
+    sendRequest("resources/list", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback(json::object(), "", McpCacheHint{}, error);
+        } else {
+            std::string nextCursor;
+            if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
+                nextCursor = result["nextCursor"].get<std::string>();
+            }
+            callback(result, nextCursor, parseCacheHint(result), json::object());
+        }
+    });
+}
+
+void McpClientSession::listPromptsWithCache(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback) {
+    if (!isReady()) {
+        callback(json::object(), "", McpCacheHint{}, notInitializedError());
+        return;
+    }
+    json params = json::object();
+    if (!cursor.empty()) {
+        params["cursor"] = cursor;
+    }
+    sendRequest("prompts/list", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback(json::object(), "", McpCacheHint{}, error);
+        } else {
+            std::string nextCursor;
+            if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
+                nextCursor = result["nextCursor"].get<std::string>();
+            }
+            callback(result, nextCursor, parseCacheHint(result), json::object());
+        }
+    });
+}
+
+void McpClientSession::listResourceTemplatesWithCache(const std::string& cursor, std::function<void(const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback) {
+    if (!isReady()) {
+        callback({}, "", McpCacheHint{}, notInitializedError());
+        return;
+    }
+    json params = json::object();
+    if (!cursor.empty()) {
+        params["cursor"] = cursor;
+    }
+    sendRequest("resources/templates/list", params, [callback](const json& result, const json& error) {
+        if (!error.empty()) {
+            callback({}, "", McpCacheHint{}, error);
+        } else {
+            std::vector<McpResourceTemplate> templates;
+            bool parseOk = true;
+            if (result.contains("resourceTemplates") && result["resourceTemplates"].is_array()) {
+                for (const auto& item : result["resourceTemplates"]) {
+                    try {
+                        templates.push_back(McpResourceTemplate::fromJson(item));
+                    } catch (...) {
+                        parseOk = false;
+                    }
+                }
+            }
+            if (!parseOk) {
+                templates.clear();
+            }
+            std::string nextCursor;
+            if (result.contains("nextCursor") && result["nextCursor"].is_string()) {
+                nextCursor = result["nextCursor"].get<std::string>();
+            }
+            callback(templates, nextCursor, parseCacheHint(result), json::object());
+        }
+    });
+}
+
+void McpClientSession::readResourceWithCache(const std::string& uri, std::function<void(const json& result, const McpCacheHint& hint, const json& error)> callback) {
+    if (!isReady()) {
+        callback(json::object(), McpCacheHint{}, notInitializedError());
+        return;
+    }
+    json params = {{"uri", uri}};
+    sendRequest("resources/read", params, [callback](const json& result, const json& error) {
+        callback(result, parseCacheHint(result), error);
+    });
 }
 
 // ==========================================
@@ -1269,6 +1671,30 @@ void McpClientSession::setTrafficCallback(TrafficCallback callback) {
 void McpClientSession::setProtocolVersion(const std::string& version) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_overrideProtocolVersion = version;
+}
+
+void McpClientSession::setStatelessMode(bool enabled) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_statelessMode = enabled;
+}
+
+void McpClientSession::setLogLevel(const std::string& level) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_requestLogLevel = level;
+}
+
+std::string McpClientSession::getLogLevel() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_requestLogLevel;
+}
+
+bool McpClientSession::isStatelessMode() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_statelessMode;
+}
+
+bool McpClientSession::isReady() const {
+    return modernMode() || m_state == SessionState::Initialized;
 }
 
 void McpClientSession::log(LogLevel level, const std::string& message) {

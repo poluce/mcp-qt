@@ -49,6 +49,7 @@ struct McpTool {
     std::string description;
     json inputSchema; // JSON schema describing parameters
     ToolAnnotations annotations; // Optional behavioral annotations
+    json meta; // 工具顶层 _meta（MCP Apps: ui.resourceUri / ui.visibility 等）
 };
 
 inline bool isValidToolName(const std::string& name) {
@@ -71,6 +72,9 @@ inline void to_json(json& j, const McpTool& tool) {
         !tool.annotations.openWorldHint || !tool.annotations.description.empty()) {
         j["annotations"] = tool.annotations.toJson();
     }
+    if (!tool.meta.empty()) {
+        j["_meta"] = tool.meta;
+    }
 }
 
 inline void from_json(const json& j, McpTool& tool) {
@@ -83,6 +87,9 @@ inline void from_json(const json& j, McpTool& tool) {
     }
     if (j.contains("annotations")) {
         tool.annotations = ToolAnnotations::fromJson(j["annotations"]);
+    }
+    if (j.contains("_meta")) {
+        tool.meta = j.at("_meta");
     }
 }
 

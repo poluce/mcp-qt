@@ -1,4 +1,14 @@
+# conformance 预期失败基线（expected failures）
+# 说明：这些场景当前已知失败，属文档化缺口（见 docs/缺失功能清单.md），
+# 不视为回归。实现对应功能后应从本清单移除。
 client:
-  - auth/client-credentials-jwt
+  # C2 EMA（Enterprise Managed Authorization，RFC 8693 token exchange）未实现
+  - auth/enterprise-managed-authorization
   - auth/cross-app-access-complete-flow
+  # 旧版 OAuth 端点回退（2025-03-26 早期 PRM 猜解回退）未实现
   - auth/2025-03-26-oauth-endpoint-fallback
+  # C3 DPoP（RFC 9449）未实现
+  - auth/dpop
+  - auth/dpop-nonce
+  # C4 WIF（Workload Identity Federation）未实现
+  - auth/wif-jwt-bearer

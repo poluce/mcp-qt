@@ -8,6 +8,4 @@
 #include "McpMessage.h"
 #include "IMcpTransport.h"
 #include "JsonRpcDispatcher.h"
-#include "SubprocessStdioTransport.h"
-#include "HttpSseTransport.h"
 #include "McpOAuthClient.h"

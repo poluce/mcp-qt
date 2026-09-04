@@ -1,4 +1,5 @@
 #include "LlmAgentExecutor.h"
+#include <mcp_qt_client/McpLogger.h>
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -6,6 +7,7 @@
 #include <QDebug>
 #include <iostream>
 #include <QDateTime>
+#include "mcp_qt_apps/McpAppSupport.h"
 
 namespace mcp_agent {
 
@@ -16,6 +18,10 @@ void LlmAgentExecutor::setToolDispatcher(
     std::function<void(const QString& name, const QJsonObject& args, std::function<void(mcp_qt::McpResult)> callback)> dispatcher
 ) {
     m_toolDispatcher = dispatcher;
+}
+
+void LlmAgentExecutor::setAppResourceFetcher(AppResourceFetcher fetcher) {
+    m_appResourceFetcher = fetcher;
 }
 
 void LlmAgentExecutor::setDiagnosticContext(const QString& apiUrl, const QString& apiKey, const QString& modelName) {
@@ -44,9 +50,9 @@ void LlmAgentExecutor::run(
     userMsg.content = task;
     m_history.append(userMsg);
 
-    qInfo() << "=========================================================";
-    qInfo() << "Starting ReAct loop for task:" << task;
-    qInfo() << "=========================================================";
+    mcp_qt::McpLogger::info(QStringLiteral("========================================================="), QStringLiteral("LlmAgentExecutor"));
+    mcp_qt::McpLogger::info(QStringLiteral("Starting ReAct loop for task: %1").arg(task), QStringLiteral("LlmAgentExecutor"));
+    mcp_qt::McpLogger::info(QStringLiteral("========================================================="), QStringLiteral("LlmAgentExecutor"));
 
     nextStep(availableTools, onFinish);
 }
@@ -63,9 +69,9 @@ void LlmAgentExecutor::continueRun(
     userMsg.content = task;
     m_history.append(userMsg);
 
-    qInfo() << "=========================================================";
-    qInfo() << "Continuing ReAct loop for multi-turn task:" << task;
-    qInfo() << "=========================================================";
+    mcp_qt::McpLogger::info(QStringLiteral("========================================================="), QStringLiteral("LlmAgentExecutor"));
+    mcp_qt::McpLogger::info(QStringLiteral("Continuing ReAct loop for multi-turn task: %1").arg(task), QStringLiteral("LlmAgentExecutor"));
+    mcp_qt::McpLogger::info(QStringLiteral("========================================================="), QStringLiteral("LlmAgentExecutor"));
 
     nextStep(availableTools, onFinish);
 }
@@ -80,7 +86,7 @@ void LlmAgentExecutor::nextStep(
     }
 
     m_currentStep++;
-    qInfo() << QString("[ReAct Loop] Step %1/%2: Requesting decision from LLM...").arg(m_currentStep).arg(m_maxSteps).toStdString().c_str();
+    mcp_qt::McpLogger::info(QStringLiteral("[ReAct Loop] Step %1/%2: Requesting decision from LLM...").arg(m_currentStep).arg(m_maxSteps), QStringLiteral("LlmAgentExecutor"));
 
     m_backend->requestDecision(m_history, availableTools, [this, availableTools, onFinish](bool success, LlmDecision dec, QString err) {
         if (!success) {
@@ -105,7 +111,7 @@ void LlmAgentExecutor::nextStep(
             return;
         }
 
-        qInfo().noquote() << "[Thought]" << dec.thought;
+        mcp_qt::McpLogger::info(QStringLiteral("[Thought] %1").arg(dec.thought), QStringLiteral("LlmAgentExecutor"));
         emit stepProgress(QStringLiteral("thought"), dec.thought);
 
         // 保存大模型在这一步的思考输出
@@ -121,9 +127,10 @@ void LlmAgentExecutor::nextStep(
         m_history.append(assistantMsg);
 
         if (dec.isToolCall) {
-            qInfo().noquote() << "[Act] Call tool:" << dec.toolName 
-                              << "with arguments:" 
-                              << QJsonDocument(dec.toolArguments).toJson(QJsonDocument::Compact);
+            mcp_qt::McpLogger::info(QStringLiteral("[Act] Call tool: %1 with arguments: %2")
+                               .arg(dec.toolName,
+                                    QString::fromUtf8(QJsonDocument(dec.toolArguments).toJson(QJsonDocument::Compact))),
+                               QStringLiteral("LlmAgentExecutor"));
             emit stepProgress(QStringLiteral("act"), QStringLiteral("Call tool: %1 with args: %2").arg(dec.toolName, QJsonDocument(dec.toolArguments).toJson(QJsonDocument::Compact)));
 
             if (!m_toolDispatcher) {
@@ -132,6 +139,37 @@ void LlmAgentExecutor::nextStep(
             }
 
             m_toolDispatcher(dec.toolName, dec.toolArguments, [this, dec, availableTools, onFinish](mcp_qt::McpResult res) {
+                // MCP Apps 内联：工具结果含 text/html;profile=mcp-app 内容 → 直接渲染
+                const QString appMime = QString::fromUtf8(mcp_qt::kMcpAppMimeType);
+                bool appEmitted = false;
+                for (const auto& c : res.contents) {
+                    if (c.mimeType == appMime && !c.text.isEmpty()) {
+                        const QJsonObject uiMeta = res.data.value(QStringLiteral("_meta")).toObject().value(QStringLiteral("ui")).toObject();
+                        emit mcpAppContentAvailable(c.text, dec.toolName, uiMeta,
+                                                    dec.toolArguments, res.data);
+                        appEmitted = true;
+                        break;
+                    }
+                }
+                // MCP Apps 引用式由工具声明的 _meta.ui.resourceUri 决定。不能依赖
+                // 某个 App 在工具结果里额外返回 viewUUID；规范 App 可以只返回普通
+                // structuredContent（Three.js/System Monitor 等即采用这种形式）。
+                if (!appEmitted && !res.isError && m_appResourceFetcher) {
+                    m_appResourceFetcher(dec.toolName, [this, dec, res](const QString& html, const QJsonObject& uiMeta, const QString& error) {
+                        if (!error.isEmpty()) {
+                            // 普通非 App 工具没有 resourceUri 是正常情况，不污染日志。
+                            if (!error.contains(QStringLiteral("未声明 _meta.ui.resourceUri"))) {
+                                mcp_qt::McpLogger::warning(QStringLiteral("MCP Apps 资源获取失败: %1").arg(error), QStringLiteral("LlmAgentExecutor"));
+                            }
+                            return;
+                        }
+                        if (!html.isEmpty()) {
+                            emit mcpAppContentAvailable(html, dec.toolName, uiMeta,
+                                                        dec.toolArguments, res.data);
+                        }
+                    });
+                }
+
                 QString obs;
                 if (res.isError) {
                     obs = "Error: " + res.errorString;
@@ -139,7 +177,7 @@ void LlmAgentExecutor::nextStep(
                     obs = QJsonDocument(res.data).toJson(QJsonDocument::Compact);
                 }
 
-                qInfo().noquote() << "[Observation]" << obs;
+                mcp_qt::McpLogger::info(QStringLiteral("[Observation] %1").arg(obs), QStringLiteral("LlmAgentExecutor"));
                 emit stepProgress(QStringLiteral("observation"), obs);
 
                 // 将工具调用获得的观测结果 Observation 加入历史，以作为大模型下一步自反思的输入
@@ -155,7 +193,7 @@ void LlmAgentExecutor::nextStep(
             });
         } else {
             // 大模型宣告找到最终答案
-            qInfo().noquote() << "[Final Answer]" << dec.finalAnswer;
+            mcp_qt::McpLogger::info(QStringLiteral("[Final Answer] %1").arg(dec.finalAnswer), QStringLiteral("LlmAgentExecutor"));
             emit stepProgress(QStringLiteral("answer"), dec.finalAnswer);
             onFinish(true, dec.finalAnswer);
         }

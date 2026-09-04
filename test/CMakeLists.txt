@@ -15,6 +15,18 @@ add_executable(tests_qt
     test_qt_stateless_http_transport.cpp
     test_qt_server_manager_router.cpp
     test_multi_server_agent_diagnostics.cpp
+    test_qt_stateless_session.cpp
+    test_qt_highlevel_stateless.cpp
+    test_qt_tasks.cpp
+    test_qt_server_view.cpp
+    test_qt_logger.cpp
+    test_qt_protocol_config.cpp
+    test_qt_mcp_app_bridge.cpp
+    test_mcp_app_content_adapter.cpp
+    test_multi_agent_registry.cpp
+    ../examples/multi_server_agent/AgentRegistry.cpp
+    ../examples/multi_server_agent/AgentReconciler.cpp
+    test_es256_jwt.cpp
 )
 
 target_include_directories(tests_qt PRIVATE
@@ -24,12 +36,13 @@ target_include_directories(tests_qt PRIVATE
     ${CMAKE_SOURCE_DIR}/src/transport/include
     ${CMAKE_SOURCE_DIR}/src/transport/src
     ${CMAKE_SOURCE_DIR}/src/client/include
+    ${CMAKE_SOURCE_DIR}/src/apps/include
 )
 
 target_link_libraries(tests_qt PRIVATE
     mcp_qt_transport
     mcp_qt_client
-    multi_server_agent_core
+    mcp_qt_apps
     Qt6::Core
     Qt6::Network
     Qt6::Test
@@ -50,6 +63,30 @@ target_include_directories(tests_qt_https_runtime PRIVATE
 
 target_link_libraries(tests_qt_https_runtime PRIVATE
     mcp_qt_transport
+    Qt6::Core
+    Qt6::Network
+)
+
+# MCP Apps A4 端到端测试（独立目标：需 node 起 mock 服务器，避免干扰主测试）
+add_executable(tests_qt_apps_e2e EXCLUDE_FROM_ALL
+    e2e_main.cpp
+    test_qt_mcp_apps_e2e.cpp
+    common.cpp
+)
+
+target_include_directories(tests_qt_apps_e2e PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src/transport/include
+    ${CMAKE_SOURCE_DIR}/src/transport/src
+    ${CMAKE_SOURCE_DIR}/src/client/include
+    ${CMAKE_SOURCE_DIR}/src/apps/include
+)
+
+target_link_libraries(tests_qt_apps_e2e PRIVATE
+    mcp_qt_transport
+    mcp_qt_client
+    mcp_qt_apps
     Qt6::Core
     Qt6::Network
 )

@@ -3,6 +3,7 @@
 #include <mcp_qt_transport/QtHttpSseTransport.h>
 #include <mcp_core/McpOAuthClient.h>
 #include <QTimer>
+#include <atomic>
 #include <iostream>
 
 namespace mcp_conformance {
@@ -10,13 +11,20 @@ namespace mcp_conformance {
 // ========== 基本场景（McpQtClient / Qt 原生 QNAM）==========
 
 int runInitialize(const RunnerConfig& c) {
+    auto cl = mcp_qt::McpQtClient::createForTest();
+    if (!c.protocolVersion.empty()) {
+        cl->setProtocolVersion(QString::fromStdString(c.protocolVersion));
+    }
+    auto t = std::make_shared<mcp_qt::QtHttpSseTransport>(c.serverUrl);
+    if (!c.protocolVersion.empty()) {
+        t->setProtocolVersion(c.protocolVersion);
+    }
     QString err;
-    auto cl = mcp_qt::McpQtClient::connectHttpAndWait(QString::fromStdString(c.serverUrl), "mcp-conformance-client-cpp", "1.0.0", 10000, &err);
-    if (!cl) {
-        std::cerr << "[runInitialize] connectHttpAndWait failed: " << err.toStdString() << std::endl;
+    if (!cl->connectToTransportAndWait(t, "mcp-conformance-client-cpp", "1.0.0", 10000, &err)) {
+        std::cerr << "[runInitialize] connect failed: " << err.toStdString() << std::endl;
         return 1;
     }
-    
+
     QEventLoop loop;
     bool hasError = false;
     QString listToolsErr;
@@ -27,7 +35,7 @@ int runInitialize(const RunnerConfig& c) {
     });
     QTimer::singleShot(10000, &loop, &QEventLoop::quit);
     loop.exec();
-    
+
     if (hasError) {
         std::cerr << "[runInitialize] listToolsAsync failed: " << listToolsErr.toStdString() << std::endl;
         return 1;
@@ -56,6 +64,9 @@ int runToolsCall(const RunnerConfig& c) {
 
 int runSseRetry(const RunnerConfig& c) {
     auto cl = mcp_qt::McpQtClient::createForTest();
+    if (!c.protocolVersion.empty()) {
+        cl->setProtocolVersion(QString::fromStdString(c.protocolVersion));
+    }
     auto t = std::make_shared<mcp_qt::QtHttpSseTransport>(c.serverUrl);
     if (!c.protocolVersion.empty()) {
         t->setProtocolVersion(c.protocolVersion);
@@ -91,6 +102,9 @@ int runSseRetry(const RunnerConfig& c) {
 int runElicitationDefaults(const RunnerConfig& c) {
     // 使用 createForTest + connectToTransportAndWait，确保在 initialize 前注册 handler 和 capability
     auto cl = mcp_qt::McpQtClient::createForTest();
+    if (!c.protocolVersion.empty()) {
+        cl->setProtocolVersion(QString::fromStdString(c.protocolVersion));
+    }
 
     // 预注册 elicitation capability（在 connectToTransportAndWait 中会在 initialize 前生效）
     QJsonObject ec; ec["form"] = QJsonObject{{"applyDefaults", true}};
@@ -149,6 +163,15 @@ static int _raQt(const RunnerConfig& c, bool ct) {
     auto t = std::make_shared<mcp_qt::QtStatelessHttpTransport>(QString::fromStdString(c.serverUrl));
     if (!c.protocolVersion.empty()) {
         t->setProtocolVersion(c.protocolVersion);
+    } else {
+        // 旧 conformance 框架（0.1.x）不传 spec-version：按 2025-11-25 legacy 处理
+        t->setProtocolVersion("2025-11-25");
+    }
+
+    // 2026-07-28 无状态模式：跳过 legacy initialize 握手（SEP-2575/2567）。
+    // 仅当框架显式指定 spec-version=2026-07-28 时启用；为空（旧框架）或其它版本走 legacy。
+    if (c.protocolVersion == "2026-07-28") {
+        cl->setStatelessMode(true);
     }
 
     // 设置 OAuth 支持
@@ -161,9 +184,12 @@ static int _raQt(const RunnerConfig& c, bool ct) {
     // OAuth 重试计数器（限制最多 3 次，符合 auth/scope-retry-limit 场景要求）
     auto authRetryCount = std::make_shared<int>(0);
     constexpr int kMaxAuthRetries = 3;
+    // OAuth 失败标志：拒绝类场景（iss 不匹配/缺失等）中客户端必须快速失败，避免超时
+    auto oauthFailed = std::make_shared<std::atomic<bool>>(false);
 
-    t->setAuthRetryHandler([oc, &c, authRetryCount](const std::string& wwwAuth) -> bool {
+    t->setAuthRetryHandler([oc, &c, authRetryCount, oauthFailed](const std::string& wwwAuth) -> bool {
         if (!oc) return false;
+        if (*oauthFailed) return false;
 
         // 检查重试次数限制
         (*authRetryCount)++;
@@ -180,12 +206,22 @@ static int _raQt(const RunnerConfig& c, bool ct) {
             if (c.context.contains("private_key_pem")) ctx["private_key_pem"] = c.context["private_key_pem"];
             if (c.context.contains("signing_algorithm")) ctx["signing_algorithm"] = c.context["signing_algorithm"];
         }
-        return mcp_qt::McpQtClient::runOAuthFlow(c.serverUrl, ctx, wwwAuth, oc);
+        // 401 即服务器拒绝当前 token：先作废，避免 OAuthFlowLock 复用被拒 token
+        // （SEP-2352：AS 变更后旧 token 仍"未过期"，不复用则无法触发重新发现+重新注册）
+        oc->setCurrentToken(mcp::OAuthToken{});
+        bool ok = mcp_qt::McpQtClient::runOAuthFlow(c.serverUrl, ctx, wwwAuth, oc);
+        if (!ok) {
+            *oauthFailed = true;
+            return false;
+        }
+        return true;
     });
 
     QString errStr;
     // 使用 connectToTransportAndWait 自动进行 initialize 握手与 Auth 认证逻辑
     if (!cl->connectToTransportAndWait(t, "mcp-qt-client", "1.0.0", 15000, &errStr)) return 1;
+    // OAuth 拒绝（iss 校验失败等）：客户端应整体失败，不再继续（allowClientError 场景）
+    if (*oauthFailed) return 1;
 
     QEventLoop loop;
     bool hasError = false;

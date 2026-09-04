@@ -9,6 +9,7 @@
 #include <QTimer>
 #include <memory>
 #include <functional>
+#include <map>
 
 namespace mcp_qt {
 
@@ -34,6 +35,7 @@ public:
     void setOnClose(std::function<void()> callback) override;
     void setOnError(std::function<void(const std::string&)> callback) override;
     void setProtocolVersion(const std::string& version) override;
+    void setExtraRequestHeaders(const std::map<std::string, std::string>& headers) override;
 
     // 扩展配置
     void setCustomHeaders(const QMap<QByteArray, QByteArray>& headers);
@@ -54,6 +56,9 @@ private:
     void applyCommonHeaders(QNetworkRequest& request, bool isGet = false);
     QString currentBearerToken() const;
 
+    // 按 SEP-2243 对 MCP header 值做 Base64 sentinel 编码
+    QByteArray encodeMcpHeaderValue(const std::string& raw) const;
+
     // 解析 SSE 响应
     QByteArray m_sseBuffer;
 
@@ -63,11 +68,14 @@ private:
     bool m_isRunning{false};
     bool m_sseListenerActive{false};
 
-    std::string m_protocolVersion{"2025-11-25"};
+    std::string m_protocolVersion{"2026-07-28"};
 
     std::function<void(const std::string&)> m_onMessage;
     std::function<void()> m_onClose;
     std::function<void(const std::string&)> m_onError;
+
+    // x-mcp-header 扩展：session 层通过 setExtraRequestHeaders 注入的附加 headers
+    std::map<std::string, std::string> m_extraRequestHeaders;
 
     // OAuth 支持
     TokenProvider m_tokenProvider;

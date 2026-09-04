@@ -260,39 +260,3 @@ public:
         }
     }
 };
-
-// Declarations of modular tests
-void test_initialize();
-void test_json_rpc();
-void test_capabilities();
-void test_error_response();
-
-void test_stdio_transport();
-void test_http_transport();
-void test_process_lifecycle();
-
-void test_tools();
-void test_traffic_logging();
-void test_resources();
-void test_prompts();
-void test_notifications();
-void test_ping();
-void test_resource_templates();
-void test_complete();
-void test_elicitation();
-void test_tool_annotations();
-void test_protocol_negotiation();
-void test_progress_notification();
-void test_sampling();
-void test_roots();
-void test_elicitation_full();
-void test_oauth_client();
-void test_notification_debounce();
-void test_recovery();
-
-void test_with_filesystem_server();
-void test_with_anysearch_mcp();
-void test_with_inspector_cases();
-
-void test_qt_stateless_http_transport_basic();
-void test_qt_stateless_http_transport_headers();

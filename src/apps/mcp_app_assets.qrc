@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/mcp_qt_apps">
+    <file alias="bridge.js">assets/bridge.js</file>
+    <file alias="sandbox.html">assets/sandbox.html</file>
+  </qresource>
+</RCC>

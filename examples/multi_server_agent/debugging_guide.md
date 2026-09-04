@@ -24,7 +24,7 @@
 *   在国内网络环境下，即使本地开启了代理和 **TUN 模式**，如果代理的 Rules 规则没有将该特定 AI 域名收录（被判定为 `DIRECT` 直连），也会因为直连 AWS 东京/北美节点丢包而导致长连接握手死锁。
 
 ### 🛠️ 解决方案
-1.  在 [examples_config.json](file:///F:/B_My_Document/GitHub/mcp-cpp-agent/examples/multi_server_agent/examples_config.json) 中为 `anysearch` 注入合法的 Authorization 头：
+1.  在本仓库 [`examples_config.json`](examples_config.json) 中为 `anysearch` 注入合法的 Authorization 头：
     ```json
     "anysearch": {
         "command": "npx.cmd",

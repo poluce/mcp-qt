@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html style="width:100%;height:100%">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#fff;width:100%;height:100%;overflow:hidden">
+<div id="app" style="width:100%;height:100%;overflow:hidden"></div>
+<script>
+(function () {
+  function post(message) {
+    try { window.chrome.webview.postMessage(message); } catch (_) {}
+  }
+  var iframe = null;
+  var pendingToApp = [];
+  post({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready', params: {} });
+
+  function buildAllow(permissions) {
+    var allow = [];
+    if (permissions && permissions.camera) allow.push('camera');
+    if (permissions && permissions.microphone) allow.push('microphone');
+    if (permissions && permissions.geolocation) allow.push('geolocation');
+    if (permissions && permissions.clipboardWrite) allow.push('clipboard-write');
+    return allow.join(' ');
+  }
+
+  function wrapWithCsp(html, csp) {
+    var meta = '<meta http-equiv="Content-Security-Policy" content="' +
+      String(csp).replace(/"/g, '&quot;') + '">';
+    var match = /<head[^>]*>/i.exec(html);
+    if (match) {
+      var index = html.indexOf(match[0]) + match[0].length;
+      return html.slice(0, index) + meta + html.slice(index);
+    }
+    return '<!DOCTYPE html><html><head><meta charset="utf-8">' + meta +
+      '</head><body>' + html + '</body></html>';
+  }
+
+  function loadResource(params) {
+    try {
+      var html = wrapWithCsp(params.html || '', params.csp || '');
+      if (params.bridgeScript) {
+        html = html.replace(/<\/head>/i, '<script>' + params.bridgeScript + '<\/script></head>');
+      }
+      iframe = document.createElement('iframe');
+      iframe.setAttribute('sandbox', params.sandbox || 'allow-scripts allow-same-origin');
+      var allow = buildAllow(params.permissions);
+      if (allow) iframe.setAttribute('allow', allow);
+      var border = params.prefersBorder === false ? 'none' : '1px solid #aab';
+      iframe.style.cssText = 'width:100%;height:100%;border:' + border + ';display:block;';
+      if (params.url) iframe.src = params.url;
+      else iframe.srcdoc = html;
+      document.getElementById('app').appendChild(iframe);
+
+      setTimeout(function () {
+        try {
+          post({ jsonrpc: '2.0', method: 'debug/sandbox-size', params: {
+            viewport: [window.innerWidth, window.innerHeight],
+            app: [document.getElementById('app').clientWidth, document.getElementById('app').clientHeight],
+            iframe: [iframe.clientWidth, iframe.clientHeight]
+          }});
+        } catch (_) {}
+      }, 500);
+
+      pendingToApp.forEach(function (message) {
+        try { iframe.contentWindow.postMessage(message, '*'); } catch (_) {}
+      });
+      pendingToApp = [];
+    } catch (error) {
+      post({ jsonrpc: '2.0', method: 'debug/sandbox-error', params: { err: String(error) }});
+    }
+  }
+
+  window.chrome.webview.addEventListener('message', function (event) {
+    var message = event.data;
+    if (!message || typeof message !== 'object') return;
+    if (message.method === 'ui/notifications/sandbox-resource-ready') {
+      loadResource(message.params || {});
+      return;
+    }
+    if (String(message.method).indexOf('ui/notifications/sandbox-') === 0) return;
+    if (iframe) {
+      try { iframe.contentWindow.postMessage(message, '*'); } catch (_) {}
+    } else pendingToApp.push(message);
+  });
+
+  window.addEventListener('message', function (event) {
+    var message = event.data;
+    if (!message || typeof message !== 'object' || !message.method) return;
+    if (String(message.method).indexOf('ui/notifications/sandbox-') === 0) return;
+    post(message);
+  });
+})();
+</script>
+</body>
+</html>

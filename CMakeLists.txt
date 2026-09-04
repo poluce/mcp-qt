@@ -23,6 +23,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Network Test)
 add_subdirectory(src/core)
 add_subdirectory(src/transport)
 add_subdirectory(src/client)
+add_subdirectory(src/apps)
 
 # If this is the top-level project, build tests and examples
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)

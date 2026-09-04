@@ -55,6 +55,9 @@ McpHost::McpHost(QObject* parent)
     connect(m_manager, &McpServerManager::clientPromptsChanged, this, [this]() {
         emit globalPromptsChanged();
     });
+    connect(m_manager, &McpServerManager::clientInputRequired, this, [this](const QString& serverName, const QString& reqId, const QJsonObject& inputRequests, const QString& requestState, mcp_qt::MrtrReplyCallback cb) {
+        emit inputRequired(serverName, reqId, inputRequests, requestState, cb);
+    });
 }
 
 McpHost::~McpHost() {
@@ -90,6 +93,15 @@ bool McpHost::loadConfigs(const QList<McpServerConfig>& configs) {
 }
 
 void McpHost::addServerConfig(const McpServerConfig& config) {
+    // 同名覆盖去重：与 addOrUpdateServerConfig 的"更新"语义对齐；
+    // 差异仅在"不启动、不持久化"（start() 时才连接）。
+    for (int i = 0; i < m_loadedConfigs.size(); ++i) {
+        if (m_loadedConfigs[i].serverName == config.serverName) {
+            m_loadedConfigs[i] = config;
+            m_enabledServers.insert(config.serverName, !config.disabled);
+            return;
+        }
+    }
     m_loadedConfigs.append(config);
     m_enabledServers.insert(config.serverName, !config.disabled);
 }
@@ -155,11 +167,29 @@ bool McpHost::reloadConfigAndRestart(int timeoutMs) {
 }
 
 QStringList McpHost::serverNames() const {
+    // 语义统一为"已注册（已连接）"——与 McpServerManager::serverNames() 一致
+    return m_manager->serverNames();
+}
+
+QStringList McpHost::configuredServerNames() const {
     QStringList names;
     for (const auto& cfg : m_loadedConfigs) {
         names.append(cfg.serverName);
     }
     return names;
+}
+
+void McpHost::restartServer(const QString& serverName) {
+    for (const auto& cfg : m_loadedConfigs) {
+        if (cfg.serverName == serverName) {
+            m_manager->stopServer(serverName);
+            if (m_enabledServers.value(serverName, false)) {
+                m_manager->startServer(cfg);
+            }
+            return;
+        }
+    }
+    m_reporter->addError("Server", QString("restartServer: no config for %1").arg(serverName));
 }
 
 void McpHost::setServerEnabled(const QString& serverName, bool enabled, bool persist) {
@@ -217,88 +247,58 @@ void McpHost::addOrUpdateServerConfig(const McpServerConfig& config, bool persis
     }
 }
 
-bool McpHost::persistServerProperty(const QString& serverName, const QString& key, const QJsonValue& value) {
+bool McpHost::readWriteConfig(bool allowMissing, const std::function<bool(QJsonObject&)>& mutate) {
     if (m_lastConfigPath.isEmpty()) return false;
+    QJsonObject root;
     QFile file(m_lastConfigPath);
-    if (!file.open(QIODevice::ReadOnly)) return false;
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    file.close();
+    if (file.open(QIODevice::ReadOnly)) {
+        root = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+    } else if (!allowMissing) {
+        return false;
+    }
 
-    QJsonObject root = doc.object();
-    QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
-    
-    if (serversObj.contains(serverName)) {
+    if (!mutate(root)) return false;
+
+    QSaveFile saveFile(m_lastConfigPath);
+    if (saveFile.open(QIODevice::WriteOnly)) {
+        saveFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+        return saveFile.commit();
+    }
+    return false;
+}
+
+bool McpHost::persistServerProperty(const QString& serverName, const QString& key, const QJsonValue& value) {
+    return readWriteConfig(false, [&](QJsonObject& root) {
+        QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
+        if (!serversObj.contains(serverName)) return false;
         QJsonObject srvObj = serversObj[serverName].toObject();
         srvObj[key] = value;
         serversObj[serverName] = srvObj;
-        
-        if (root.contains(QStringLiteral("mcpServers"))) {
-            root[QStringLiteral("mcpServers")] = serversObj;
-        } else {
-            root = serversObj;
-        }
-        
-        QSaveFile saveFile(m_lastConfigPath);
-        if (saveFile.open(QIODevice::WriteOnly)) {
-            saveFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            return saveFile.commit();
-        }
-    }
-    return false;
+        if (root.contains(QStringLiteral("mcpServers"))) root[QStringLiteral("mcpServers")] = serversObj;
+        else root = serversObj;
+        return true;
+    });
 }
 
 bool McpHost::persistServerObject(const QString& serverName, const QJsonObject& obj) {
-    if (m_lastConfigPath.isEmpty()) return false;
-    QFile file(m_lastConfigPath);
-    QJsonDocument doc;
-    if (file.open(QIODevice::ReadOnly)) {
-        doc = QJsonDocument::fromJson(file.readAll());
-        file.close();
-    }
-
-    QJsonObject root = doc.object();
-    QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
-    
-    serversObj[serverName] = obj;
-    
-    if (root.contains(QStringLiteral("mcpServers"))) {
-        root[QStringLiteral("mcpServers")] = serversObj;
-    } else {
-        root = serversObj;
-    }
-    
-    QSaveFile saveFile(m_lastConfigPath);
-    if (saveFile.open(QIODevice::WriteOnly)) {
-        saveFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-        return saveFile.commit();
-    }
-    return false;
+    return readWriteConfig(true, [&](QJsonObject& root) {
+        QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
+        serversObj[serverName] = obj;
+        if (root.contains(QStringLiteral("mcpServers"))) root[QStringLiteral("mcpServers")] = serversObj;
+        else root = serversObj;
+        return true;
+    });
 }
 
 bool McpHost::persistRemoveServer(const QString& serverName) {
-    if (m_lastConfigPath.isEmpty()) return false;
-    QFile file(m_lastConfigPath);
-    if (!file.open(QIODevice::ReadOnly)) return false;
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    file.close();
-
-    QJsonObject root = doc.object();
-    QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
-    
-    serversObj.remove(serverName);
-    
-    if (root.contains(QStringLiteral("mcpServers"))) {
-        root[QStringLiteral("mcpServers")] = serversObj;
-    } else {
-        root = serversObj;
-    }
-    
-    QSaveFile saveFile(m_lastConfigPath);
-    if (saveFile.open(QIODevice::WriteOnly)) {
-        saveFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-        return saveFile.commit();
-    }
-    return false;
+    return readWriteConfig(false, [&](QJsonObject& root) {
+        QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
+        serversObj.remove(serverName);
+        if (root.contains(QStringLiteral("mcpServers"))) root[QStringLiteral("mcpServers")] = serversObj;
+        else root = serversObj;
+        return true;
+    });
 }
 
 QJsonObject McpHost::serializeServerConfig(const McpServerConfig& cfg) const {

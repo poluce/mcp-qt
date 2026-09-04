@@ -3,6 +3,13 @@ build/
 bin/
 lib/
 
+# WebView2 SDK 头文件位于 third_party/webview2/sdk/build/native/include/，
+# 被上面的 build/ 模式误伤（git 无法重新包含被忽略目录内的文件，需逐级放行）。
+# 这些头文件是 mcp_qt_apps 构建必需，必须入库。
+!third_party/webview2/sdk/build/
+!third_party/webview2/sdk/build/native/
+!third_party/webview2/sdk/build/native/include/
+
 # IDE configurations
 .vscode/
 .idea/
@@ -20,3 +27,5 @@ Desktop.ini
 build_sdk
 build_*
 .playwright*
+# 示例运行时日志
+multi_server_agent.log

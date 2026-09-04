@@ -30,20 +30,25 @@ public:
 
     void handleConnection() {
         QTcpSocket* socket = server.nextPendingConnection();
-        connect(socket, &QTcpSocket::readyRead, [this, socket]() {
-            QByteArray request = socket->readAll();
+        // 缓冲累积读取，避免 readyRead 分段（TCP 粘包/拆包）导致 headers 读取不全
+        auto buffer = std::make_shared<QByteArray>();
+        connect(socket, &QTcpSocket::readyRead, [this, socket, buffer]() {
+            QByteArray chunk = socket->readAll();
+            buffer->append(chunk);
+            int bodyIdx = buffer->indexOf("\r\n\r\n");
+            if (bodyIdx == -1) return;  // headers 尚未完整，等待更多数据
+            QByteArray request = *buffer;
             lastRequestData = request;
             requestCount++;
-            
+
+            QByteArray reqBody = request.mid(bodyIdx + 4);
             QByteArray responseBody;
             if (handler) {
-                int bodyIdx = request.indexOf("\r\n\r\n");
-                QByteArray reqBody = bodyIdx != -1 ? request.mid(bodyIdx + 4) : QByteArray();
                 responseBody = handler(reqBody);
             } else {
                 responseBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
             }
-            
+
             QByteArray response = "HTTP/1.1 200 OK\r\n"
                                   "Content-Type: application/json\r\n"
                                   "Content-Length: " + QByteArray::number(responseBody.size()) + "\r\n"
@@ -116,4 +121,35 @@ void test_qt_stateless_http_transport_headers() {
     TM_ASSERT_TRUE(server.lastRequestData.contains("Authorization: Bearer token123"), "Should send auth header");
     TM_ASSERT_TRUE(server.lastRequestData.contains("X-Custom: value"), "Should send custom header");
     TM_ASSERT_TRUE(server.lastRequestData.contains("Content-Type: application/json"), "Should preserve content type");
+}
+
+// W3C trace context headers（traceparent/tracestate/baggage）透传验证
+// —— 模拟 McpQtClient 将 McpTraceContext 合并进 custom headers 后的传输行为
+void test_qt_stateless_http_transport_trace_headers() {
+    int argc = 0;
+    char* argv[] = {nullptr};
+    std::unique_ptr<QCoreApplication> app;
+    if (!QCoreApplication::instance()) {
+        app = std::make_unique<QCoreApplication>(argc, argv);
+    }
+
+    MockStatelessServer server;
+    QString url = QString("http://127.0.0.1:%1/rpc").arg(server.port());
+    mcp_qt::QtStatelessHttpTransport transport(url);
+
+    QMap<QByteArray, QByteArray> headers;
+    headers.insert("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    headers.insert("tracestate", "congo=t61rcWkgMzE");
+    headers.insert("baggage", "userId=alice");
+    transport.setCustomHeaders(headers);
+    transport.start();
+
+    transport.send("{}");
+    waitEvents(100);
+
+    TM_ASSERT_EQ(server.requestCount, 1, "Server should receive exactly 1 request");
+    // Qt 发送时会将 header 名首字母大写（Traceparent/Tracestate/Baggage）
+    TM_ASSERT_TRUE(server.lastRequestData.contains("Traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), "Should send traceparent header");
+    TM_ASSERT_TRUE(server.lastRequestData.contains("Tracestate: congo=t61rcWkgMzE"), "Should send tracestate header");
+    TM_ASSERT_TRUE(server.lastRequestData.contains("Baggage: userId=alice"), "Should send baggage header");
 }

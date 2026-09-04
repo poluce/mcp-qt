@@ -1,20 +1,17 @@
 {
-    "logFile": "F:\\B_My_Document\\GitHub\\mcp-cpp-agent\\examples\\multi_server_agent\\persistent_test.log",
+    "agents": {
+        "agentA": [
+            "memory",
+            "everything",
+            "mcp-apps-map"
+        ],
+        "agentB": [
+            "everything",
+            "mcp-apps-map"
+        ]
+    },
+    "logFile": "F:/B_My_Document/GitHub/mcp-qt/examples/multi_server_agent/persistent_test.log",
     "mcpServers": {
-        "anysearch": {
-            "headers": {
-                "Authorization": "Bearer as_sk_606afb73b54ef0ebb61972bea522744f"
-            },
-            "type": "sse",
-            "url": "https://api.anysearch.com/mcp"
-        },
-        "context7": {
-            "args": [
-                "-y",
-                "@upstash/context7-mcp"
-            ],
-            "command": "npx.cmd"
-        },
         "everything": {
             "args": [
                 "-y",
@@ -38,6 +35,10 @@
             ],
             "command": "npx.cmd"
         },
+        "mcp-apps-map": {
+            "type": "sse",
+            "url": "http://localhost:3001/mcp"
+        },
         "memory": {
             "args": [
                 "-y",
@@ -57,6 +58,11 @@
                 "@playwright/mcp"
             ],
             "command": "npx.cmd"
+        },
+        "stateless-http-demo": {
+            "protocolVersion": "2026-07-28",
+            "type": "stateless_http",
+            "url": "http://127.0.0.1:8080/mcp"
         }
     }
 }

@@ -14,6 +14,7 @@
 #include "McpTool.h"
 #include "McpResource.h"
 #include "McpPrompt.h"
+#include "McpTask.h"
 #include "McpTrafficEvent.h"
 
 namespace mcp {
@@ -35,6 +36,44 @@ enum class LogLevel {
 using LogCallback = std::function<void(LogLevel level, const std::string& message)>;
 
 /**
+ * @brief Result of server/discover (MCP 2026-07-28, SEP-2575).
+ *
+ * Servers MUST implement server/discover. The RPC returns supportedVersions,
+ * capabilities, _meta."io.modelcontextprotocol/serverInfo" and optional
+ * instructions / ttlMs / cacheScope / resultType.
+ */
+struct McpServerDiscovery {
+    std::vector<std::string> supportedVersions;
+    json capabilities;
+    json serverInfo;   // _meta."io.modelcontextprotocol/serverInfo"
+    std::string instructions;
+    std::string resultType;
+    int64_t ttlMs{-1};
+    std::string cacheScope;
+
+    bool empty() const {
+        return supportedVersions.empty() && serverInfo.empty() && instructions.empty();
+    }
+};
+
+/**
+ * @brief Cache hint for CacheableResult (MCP 2026-07-28, SEP-2575).
+ *
+ * Servers MAY return `ttlMs` / `cacheScope` on any result to indicate cacheability.
+ * Previously only server/discover parsed these fields; now every list/read RPC
+ * (tools/list, resources/list, prompts/list, resources/templates/list,
+ * resources/read) exposes them through the WithCache APIs.
+ */
+struct McpCacheHint {
+    int64_t ttlMs{-1};
+    std::string cacheScope;
+
+    bool empty() const {
+        return ttlMs < 0 && cacheScope.empty();
+    }
+};
+
+/**
  * @brief Manages a Model Context Protocol Client Session.
  * 
  * Tracks pending requests, routes incoming server responses/notifications, and provides
@@ -44,8 +83,26 @@ class McpClientSession : public std::enable_shared_from_this<McpClientSession> {
 public:
     static constexpr auto MCP_PROTOCOL_VERSION = "2025-11-25";
 
+    // MCP 2026-07-28 通用 resultType 语义：所有结果 MUST 携带 resultType；
+    // 缺省视为 complete；未知值视为无效（回调 -32998）。
+    static constexpr const char* kResultTypeComplete = "complete";
+    static constexpr const char* kResultTypeInputRequired = "input_required";
+    // Tasks 扩展（SEP-2663）：tools/call 等受支持请求可返回 CreateTaskResult
+    // （resultType: "task"）代替标准结果，表示异步执行。
+    static constexpr const char* kResultTypeTask = "task";
+
+    // 2026-07-28 错误码分区（SEP-2575）：
+    //   -32000..-32019 : schema 保留区（协议/服务器错误）
+    //   -32020..-32099 : 传输/协议协商错误（-32020 HeaderMismatch, -32022 UnsupportedProtocolVersion）
+    //   客户端本地实现错误统一使用 -32900 系列，避免落入 legacy/schema 保留区。
+    static constexpr int64_t kErrorTimeout = -32900;           // 本地同步/异步超时
+    static constexpr int64_t kErrorCancelled = -32901;         // 本地取消 / MRTR 无 handler
+    static constexpr int64_t kErrorNotInitialized = -32902;    // 会话未初始化 / 版本不匹配
+    static constexpr int64_t kErrorUnknownResultType = -32998; // 未知 resultType
+
     // 客户端支持的协议版本列表（按优先级排序，最新在前）
     static inline const std::vector<std::string> SUPPORTED_PROTOCOL_VERSIONS = {
+        "2026-07-28",
         "2025-11-25",
         "2025-06-18",
         "2025-03-26"
@@ -55,6 +112,7 @@ public:
     using NotificationCallback = std::function<void(const json& params)>;
     using RequestCallback = std::function<void(const std::string& method, const json& params, std::function<void(const json& result, const json& error)> callback)>;
     using ProgressCallback = std::function<void(const json& progressInfo)>;
+    using SubscriptionListener = std::function<void(int64_t subscriptionId, const std::string& method, const json& params)>;
 
     /**
      * @brief Handler for sampling/createMessage requests from the server.
@@ -76,7 +134,35 @@ public:
      */
     using RootsProvider = std::function<void(std::function<void(const json& result, const json& error)> callback)>;
 
+    /**
+     * @brief Handler for MRTR (Multi Round-Trip Requests) when server responds with
+     *        `resultType: "input_required"` (MCP 2026-07-28, SEP-2322).
+     *
+     * Wire model (official 2026-07-28 schema):
+     *   InputRequiredResult = { resultType: "input_required",
+     *                           inputRequests?: { key: {method, params} },
+     *                           requestState?: opaque-string }
+     *   Retry request params = { ...original, inputResponses: { key: result }, requestState?: <echoed> }
+     *
+     * The handler is invoked with:
+     *   - requestId:   JSON-RPC id of the pending request (new id is minted automatically on retry).
+     *   - inputRequests: the server's InputRequests map (key -> {method, params}), may be empty.
+     *   - requestParams: the original request params (must be preserved when retrying).
+     *   - requestState:  opaque string the client MUST echo back verbatim on retry; may be empty.
+     *   - callback:      MUST be called with the client's InputResponses map (key -> result).
+     *                    For elicitation form requests the library auto-wraps flat {field: value}
+     *                    into {action:"accept", content:{...}} when a single request is present.
+     */
+    using MrtrInputHandler = std::function<void(
+        const std::string& requestId,
+        const json& inputRequests,
+        const json& requestParams,
+        const std::string& requestState,
+        std::function<void(const json& inputResponses)> callback)>;
+
     struct PendingRequest {
+        std::string method;
+        json params;
         ResponseCallback callback;
         std::chrono::steady_clock::time_point timestamp;
     };
@@ -92,7 +178,7 @@ public:
      *   session->init();
      *   session->start();
      *
-     * After connect(), call initializeSync() to complete the handshake.
+     * After connect(), call initialize() to complete the handshake.
      */
     static std::shared_ptr<McpClientSession> connect(std::shared_ptr<IMcpTransport> transport);
 
@@ -156,6 +242,13 @@ public:
     void shutdown(std::function<void(bool success)> callback);
 
     /**
+     * @brief Query server/discover (MCP 2026-07-28).
+     *        Servers MUST implement this RPC; clients should call it before other
+     *        RPCs when operating without the legacy initialize handshake.
+     */
+    void discoverServer(std::function<void(const McpServerDiscovery& info, const json& error)> callback);
+
+    /**
      * @brief List the tools exposed by the MCP server.
      */
     void listTools(std::function<void(const std::vector<McpTool>& tools, const json& error)> callback);
@@ -214,6 +307,9 @@ public:
 
     /**
      * @brief Send a ping request to the server to check connectivity.
+     * @deprecated in 2026-07-28: ping was removed from the spec (SEP-2575/2567).
+     *        In stateless mode / negotiated==2026-07-28 this callbacks
+     *        {code:-32601, message:"Method not found: ping"} and logs a warning.
      */
     void ping(std::function<void(bool success, const json& error)> callback);
 
@@ -272,10 +368,105 @@ public:
     void setRootsProvider(RootsProvider provider);
 
     /**
+     * @brief Register a handler for MRTR (Multi Round-Trip Requests) status: input_required.
+     *        When the server in stateless mode requires additional user input, the handler is triggered.
+     */
+    void setMrtrHandler(MrtrInputHandler handler);
+
+    // ==========================================
+    // Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）
+    // ==========================================
+
+    /**
+     * @brief 查询任务状态（tasks/get）。
+     *        服务器 MUST 返回 DetailedTask（resultType: "complete"）：
+     *        working / input_required(+inputRequests) / completed(+result) /
+     *        failed(+error) / cancelled。
+     * @param taskId  服务器在 CreateTaskResult 中返回的任务标识。
+     * @param callback (task, error)；error 非空表示协议错误（如 -32602 任务不存在）。
+     */
+    void getTask(const std::string& taskId, std::function<void(const McpTask& task, const json& error)> callback);
+
+    /**
+     * @brief 提交任务输入（tasks/update）。
+     *        当任务处于 input_required 时，客户端通过 inputResponses 满足
+     *        tasks/get 响应中 inputRequests 的待处理请求（key -> 结果）。
+     *        服务器以空结果确认（ack-only，最终一致）。
+     * @param taskId         任务标识。
+     * @param inputResponses InputResponses map（key -> 对应结果）。
+     * @param callback       (success, error)。
+     */
+    void updateTask(const std::string& taskId, const json& inputResponses,
+                    std::function<void(bool success, const json& error)> callback);
+
+    /**
+     * @brief 取消任务（tasks/cancel）。
+     *        取消是协作式的：服务器仅确认收到意图，不保证任务真正停止；
+     *        客户端无需继续轮询等待 cancelled 状态。
+     * @param taskId    任务标识。
+     * @param callback  (success, error)。
+     */
+    void cancelTask(const std::string& taskId, std::function<void(bool success, const json& error)> callback);
+
+    /**
+     * @brief 同步查询任务状态（tasks/get）。仅限非 GUI 线程使用。
+     */
+    McpTask getTaskSync(const std::string& taskId,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                        json* errorOut = nullptr);
+
+    /**
+     * @brief 同步提交任务输入（tasks/update）。仅限非 GUI 线程使用。
+     */
+    bool updateTaskSync(const std::string& taskId, const json& inputResponses,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                        json* errorOut = nullptr);
+
+    /**
+     * @brief 同步取消任务（tasks/cancel）。仅限非 GUI 线程使用。
+     */
+    bool cancelTaskSync(const std::string& taskId,
+                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
+                        json* errorOut = nullptr);
+
+    /**
      * @brief Notify the server that the roots list has changed.
      *        Sends notifications/roots/list_changed.
+     * @deprecated in 2026-07-28: roots/list_changed was removed from the spec.
+     *        In stateless mode / negotiated==2026-07-28 the notification is suppressed
+     *        and only a warning log is emitted.
      */
     void notifyRootsListChanged();
+
+    // ==========================================
+    // Subscriptions (MCP 2026-07-28, SEP-2330: subscriptions/listen)
+    // ==========================================
+
+    /**
+     * @brief Subscribe to server-initiated notifications (subscriptions/listen).
+     *        Sends `subscriptions/listen` with `{notifications: <filter>}`; the server
+     *        acknowledges via `notifications/subscriptions/acknowledged` carrying a
+     *        subscriptionId in `_meta."io.modelcontextprotocol/subscriptionId"`, then
+     *        delivers matching stream notifications (e.g. resources/updated) to the
+     *        listener registered with setSubscriptionListener().
+     * @param filter  Notification filter object (2026-07-28 subscription filter).
+     */
+    void listenSubscriptions(const json& filter, std::function<void(bool success, const std::string& error)> callback);
+
+    /**
+     * @brief Cancel a subscription by request id.
+     *        For stdio transports this emits `notifications/cancelled`; for HTTP the
+     *        transport owns stream lifecycle and this layer only records the cancellation.
+     */
+    void cancelSubscription(int64_t requestId);
+
+    /**
+     * @brief Register the listener invoked for subscription notifications
+     *        (acknowledged + stream notifications like resources/updated),
+     *        carrying the subscriptionId extracted from the notification _meta.
+     * @param listener (subscriptionId, method, params)
+     */
+    void setSubscriptionListener(SubscriptionListener listener);
 
     // ==========================================
     // Notification Debounce (通知去重/合并)
@@ -301,52 +492,21 @@ public:
     // Synchronous Blocking APIs (Helper wrappers)
     // ==========================================
     
-    bool initializeSync(const std::string& clientName, const std::string& clientVersion,
-                        json* serverInfoOut = nullptr,
-                        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    bool shutdownSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
     std::vector<McpTool> listToolsSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-    
-    std::vector<McpTool> listToolsSync(const std::string& cursor, std::string* nextCursorOut,
-                                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
 
-    json callToolSync(const std::string& name, const json& arguments,
-                      json* errorOut = nullptr,
-                      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000),
-                      ProgressCallback progressCallback = nullptr);
+    // ==========================================
+    // CacheableResult (MCP 2026-07-28): list/read 结果携带 ttlMs/cacheScope
+    // ==========================================
 
-    json listResourcesSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-    
-    json listResourcesSync(const std::string& cursor, std::string* nextCursorOut,
-                           std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
+    void listToolsWithCache(const std::string& cursor, std::function<void(const std::vector<McpTool>& tools, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback);
 
-    json readResourceSync(const std::string& uri, json* errorOut = nullptr, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    void listResourcesWithCache(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback);
 
-    bool subscribeResourceSync(const std::string& uri, json* errorOut = nullptr, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    void listPromptsWithCache(const std::string& cursor, std::function<void(const json& result, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback);
 
-    bool unsubscribeResourceSync(const std::string& uri, json* errorOut = nullptr, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    void listResourceTemplatesWithCache(const std::string& cursor, std::function<void(const std::vector<McpResourceTemplate>& templates, const std::string& nextCursor, const McpCacheHint& hint, const json& error)> callback);
 
-    json listPromptsSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-    
-    json listPromptsSync(const std::string& cursor, std::string* nextCursorOut,
-                         std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json getPromptSync(const std::string& name, const json& arguments,
-                       json* errorOut = nullptr,
-                       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
-
-    bool pingSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    std::vector<McpResourceTemplate> listResourceTemplatesSync(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    std::vector<McpResourceTemplate> listResourceTemplatesSync(const std::string& cursor, std::string* nextCursorOut,
-                                                               std::chrono::milliseconds timeout = std::chrono::milliseconds(5000), json* errorOut = nullptr);
-
-    json completeSync(const json& ref, const json& argument,
-                      json* errorOut = nullptr,
-                      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+    void readResourceWithCache(const std::string& uri, std::function<void(const json& result, const McpCacheHint& hint, const json& error)> callback);
 
     // ==========================================
     // Raw String APIs (Uncoupled from nlohmann/json)
@@ -357,10 +517,6 @@ public:
     
     void callToolRaw(const std::string& name, const std::string& argumentsJson,
                      std::function<void(const std::string& contentJson, const std::string& errorJson)> callback);
-                     
-    std::string callToolSyncRaw(const std::string& name, const std::string& argumentsJson,
-                                std::string* errorJsonOut = nullptr,
-                                std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
     void setLogCallback(LogCallback callback);
 
@@ -383,6 +539,25 @@ public:
      */
     void setProtocolVersion(const std::string& version);
 
+    /**
+     * @brief Enable or disable stateless mode (MCP 2026-07-28 core capability).
+     *        In stateless mode, requests carry self-contained _meta headers and do not
+     *        require explicit initialize handshake.
+     */
+    void setStatelessMode(bool enabled);
+    bool isStatelessMode() const;
+    bool isReady() const;
+
+    /**
+     * @brief 设置每请求日志级别（MCP 2026-07-28, SEP-2577）。
+     *        非空时注入到请求 _meta 的 io.modelcontextprotocol/logLevel，
+     *        服务端据此决定是否在该请求的响应流上发送 notifications/message。
+     *        传空字符串则停止注入（服务端 MUST NOT 发送日志通知）。
+     *        仅 stateless / 2026-07-28 模式下生效。
+     */
+    void setLogLevel(const std::string& level);
+    std::string getLogLevel() const;
+
     void registerCapabilities(const json& capabilities);
     std::string getNegotiatedProtocolVersion() const;
     json getServerCapabilities() const;
@@ -397,6 +572,9 @@ private:
     void handleResponse(const json& responseJson);
     void handleNotification(const json& notificationJson);
     void handleRequestFromServer(const json& requestJson);
+    void resendMrtrRequest(const std::string& method, json params, const json& inputResponses,
+                           const std::string& requestState, ResponseCallback callback);
+    void injectStatelessMeta(json& params);
 
     void log(LogLevel level, const std::string& message);
     void emitTrafficEvent(McpTrafficDirection dir, McpTrafficKind kind, const json& payload, const std::string& raw);
@@ -421,6 +599,7 @@ private:
     SamplingHandler m_samplingHandler;
     ElicitationHandler m_elicitationHandler;
     RootsProvider m_rootsProvider;
+    MrtrInputHandler m_mrtrHandler;
 
     // 通知去重状态
     struct DebounceState {
@@ -438,11 +617,27 @@ private:
         {"sampling", json::object()},
         {"elicitation", {{"modes", {"form", "url"}}}}
     };
+    // 无状态模式或已协商 2026-07-28 协议：统一走新协议语义
+    bool modernMode() const { return m_statelessMode || m_negotiatedProtocolVersion == "2026-07-28"; }
+    bool m_statelessMode{false};
+    std::string m_requestLogLevel;  // 2026-07-28 per-request logLevel（空=不注入）
+    std::string m_clientName{"mcp-qt-client"};
+    std::string m_clientVersion{"1.0.0"};
     std::string m_negotiatedProtocolVersion;
     std::string m_overrideProtocolVersion;
     json m_serverCapabilities;
     json m_serverVersion;
     std::string m_instructions;
+
+    // MCP 2026-07-28 subscriptions/listen (SEP-2330):
+    // subscriptionId -> 服务器同意的 notifications 子集 filter。
+    std::unordered_map<int64_t, json> m_subscriptions;
+    SubscriptionListener m_subscriptionListener;
+
+    // MCP 2026-07-28 x-mcp-header (SEP-2243):
+    // 工具 schema 缓存（name -> McpTool），listTools 成功回调时填充，
+    // callTool 前据此提取 Mcp-Param-{Name} 请求头。
+    std::unordered_map<std::string, McpTool> m_toolCache;
 };
 
 } // namespace mcp

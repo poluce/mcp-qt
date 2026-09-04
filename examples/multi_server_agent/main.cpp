@@ -11,6 +11,7 @@
 
 #include "examples/multi_server_agent/AgentSession.h"
 #include "LlmBackends.h"
+#include "LlmCredentialResolver.h"
 #include "AgentMainWindow.h"
 #include "mcp_qt_client/McpHost.h"
 
@@ -101,6 +102,15 @@ int main(int argc, char* argv[]) {
     parser.addOption({QStringList{QStringLiteral("api-url")}, QStringLiteral("LLM chat completions API URL"), QStringLiteral("api-url")});
     parser.addOption({QStringList{QStringLiteral("api-key")}, QStringLiteral("LLM API Key (defaults to OPENAI_API_KEY env var)"), QStringLiteral("api-key")});
     parser.addOption({QStringList{QStringLiteral("model")}, QStringLiteral("LLM Model name"), QStringLiteral("model")});
+
+    // GUI 自动化：--auto-task 打开 GUI 并自动运行任务；--screenshot 在 MCP App 渲染后截图弹窗
+    parser.addOption({QStringList{QStringLiteral("auto-task")}, QStringLiteral("Launch GUI and auto-run the given task"), QStringLiteral("auto-task")});
+    // --auto-task-file 从 UTF-8 文件读任务文本，避免 shell 空格拆词 / 控制台编码污染（含空格的中文任务请用它）
+    parser.addOption({QStringList{QStringLiteral("auto-task-file")}, QStringLiteral("Read auto-task text from UTF-8 file (robust to spaces/encoding)"), QStringLiteral("auto-task-file")});
+    parser.addOption({QStringList{QStringLiteral("screenshot")}, QStringLiteral("Save MCP App dialog screenshot to path after render"), QStringLiteral("screenshot")});
+    parser.addOption({QStringList{QStringLiteral("auto-tool")}, QStringLiteral("Deterministically call this MCP tool in GUI automation mode"), QStringLiteral("tool")});
+    parser.addOption({QStringList{QStringLiteral("auto-tool-args-json")}, QStringLiteral("JSON object passed to --auto-tool"), QStringLiteral("json"), QStringLiteral("{}")});
+    parser.addOption({QStringList{QStringLiteral("auto-tool-args-file")}, QStringLiteral("Read --auto-tool arguments from a UTF-8 JSON file"), QStringLiteral("file")});
     
     parser.process(app);
 
@@ -123,9 +133,51 @@ int main(int argc, char* argv[]) {
     // 🌟 初始化开启全局长连接日志文件写盘句柄
     updateGlobalLogFile(g_logFilePath);
 
-    // 🌟 如果没有传入 --task 参数，自动切换到精美的 GUI 可视化运行模式！
-    if (!parser.isSet(QStringLiteral("task"))) {
-        mcp_agent::AgentMainWindow w;
+    // 🌟 如果没有传入 --task / --auto-task / --auto-task-file 参数，自动切换到精美的 GUI 可视化运行模式！
+    if (!parser.isSet(QStringLiteral("task")) && !parser.isSet(QStringLiteral("auto-task"))
+        && !parser.isSet(QStringLiteral("auto-task-file"))) {
+        mcp_agent::AgentMainWindow w(nullptr, parser.value(QStringLiteral("config")));
+        w.show();
+        return app.exec();
+    }
+
+    // ==========================================
+    // GUI 自动化模式（--auto-task：打开 GUI + 自动运行任务，可配 --screenshot 截图 MCP App）
+    // ==========================================
+    if (parser.isSet(QStringLiteral("auto-task")) || parser.isSet(QStringLiteral("auto-task-file"))) {
+        mcp_agent::AgentMainWindow w(nullptr, parser.value(QStringLiteral("config")));
+        if (parser.isSet(QStringLiteral("auto-tool"))) {
+            QByteArray argsJson = parser.value(QStringLiteral("auto-tool-args-json")).toUtf8();
+            if (parser.isSet(QStringLiteral("auto-tool-args-file"))) {
+                QFile argsFile(parser.value(QStringLiteral("auto-tool-args-file")));
+                if (!argsFile.open(QIODevice::ReadOnly)) {
+                    qCritical() << "Cannot read --auto-tool-args-file:" << argsFile.fileName();
+                    return 2;
+                }
+                argsJson = argsFile.readAll();
+            }
+            QJsonParseError parseError;
+            const QJsonDocument argsDoc = QJsonDocument::fromJson(argsJson, &parseError);
+            if (parseError.error != QJsonParseError::NoError || !argsDoc.isObject()) {
+                qCritical() << "--auto-tool-args-json must be a JSON object:" << parseError.errorString();
+                return 2;
+            }
+            w.setAutomatedToolCall(parser.value(QStringLiteral("auto-tool")), argsDoc.object());
+        }
+        QString task;
+        if (parser.isSet(QStringLiteral("auto-task-file"))) {
+            QFile f(parser.value(QStringLiteral("auto-task-file")));
+            if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                task = QString::fromUtf8(f.readAll()).trimmed();
+            }
+        }
+        if (task.isEmpty()) {
+            task = parser.value(QStringLiteral("auto-task"));
+        }
+        w.submitTask(task);  // 公开接口：注入任务文本，host 就绪后自动填入输入框并发送
+        if (parser.isSet(QStringLiteral("screenshot"))) {
+            w.setScreenshotPath(parser.value(QStringLiteral("screenshot")));
+        }
         w.show();
         return app.exec();
     }
@@ -157,13 +209,10 @@ int main(int argc, char* argv[]) {
             apiUrl = QStringLiteral("https://api.openai.com/v1/chat/completions");
         }
         if (apiKey.isEmpty()) {
-            apiKey = qEnvironmentVariable("DEEPSEEK_API_KEY");
+            apiKey = mcp_agent::resolveLlmApiKey();
             if (apiKey.isEmpty()) {
-                apiKey = qEnvironmentVariable("OPENAI_API_KEY");
-                if (apiKey.isEmpty()) {
-                    std::cerr << "Error: API Key is required when using real LLM. Provide via --api-key or environment variables.\n";
-                    return 1;
-                }
+                std::cerr << "Error: API Key is required when using real LLM. Provide via --api-key, .env, or DEEPSEEK_API_KEY/DEEPSEEK/OPENAI_API_KEY.\n";
+                return 1;
             }
         }
         if (model.isEmpty()) {

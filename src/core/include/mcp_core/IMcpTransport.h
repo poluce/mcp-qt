@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <map>
 #include <functional>
 
 namespace mcp {
@@ -17,6 +18,15 @@ public:
      * @brief Set the negotiated protocol version (useful for HTTP SSE transport metadata).
      */
     virtual void setProtocolVersion(const std::string& version) {}
+
+    /**
+     * @brief Set extra per-request HTTP headers to attach to the next send(s).
+     *
+     * Used by the 2026-07-28 `x-mcp-header` feature (SEP-2243): the session layer
+     * extracts tool parameters annotated with `x-mcp-header` and delivers them as
+     * `Mcp-Param-{Name}` headers here. Transports without HTTP semantics may ignore.
+     */
+    virtual void setExtraRequestHeaders(const std::map<std::string, std::string>& headers) {}
 
     /**
      * @brief Send a raw text message over the transport.

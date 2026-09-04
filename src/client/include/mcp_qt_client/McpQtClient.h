@@ -35,6 +35,8 @@ class IMcpTransport;
 
 namespace mcp_qt {
 
+using MrtrReplyCallback = std::function<void(const QJsonObject& userResponse)>;
+
 enum class McpContentKind {
     Text,
     Image,
@@ -56,6 +58,23 @@ struct McpResult {
     QList<McpContent> contents;
 };
 
+/// W3C Trace Context（分布式追踪，2026-07-28 SEP-414 / W3C Trace-Context）。
+/// 非空时 SDK 会将其作为 HTTP 请求头（traceparent / tracestate / baggage）随每个请求发送，
+/// 使 MCP 服务器上的 span 嵌套进调用方已有的分布式 trace。
+struct McpTraceContext {
+    QString traceparent;   // W3C Trace-Context: "00-<trace-id>-<parent-id>-<flags>"
+    QString tracestate;    // 可选 vendor 状态
+    QString baggage;       // 可选 baggage 头
+    bool empty() const { return traceparent.isEmpty() && tracestate.isEmpty() && baggage.isEmpty(); }
+};
+
+/// MCP 2026-07-28 CacheableResult 缓存提示（ttlMs/cacheScope），由 list/read 结果解析。
+struct McpCacheHint {
+    qint64 ttlMs{-1};
+    QString cacheScope;
+    bool empty() const { return ttlMs < 0 && cacheScope.isEmpty(); }
+};
+
 struct McpBatchCallRequest {
     QString name;
     QJsonObject arguments;
@@ -71,6 +90,47 @@ struct McpQtTool {
     QString name;
     QString description;
     QJsonObject inputSchema;
+    QJsonObject meta;  // 工具顶层 _meta（MCP Apps: ui.resourceUri / ui.visibility 等）
+};
+
+/// MCP Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）任务值类型（Qt 友好版）。
+/// 服务器可在 tools/call 响应中返回 CreateTaskResult（resultType: "task"）表示异步执行；
+/// 客户端通过 tasks/get 轮询、tasks/update 提交输入、tasks/cancel 取消。
+struct McpQtTask {
+    QString taskId;              // 服务器生成的稳定任务标识
+    QString status;              // working / input_required / completed / cancelled / failed
+    QString statusMessage;       // 可选状态描述
+    QString createdAt;           // ISO 8601 创建时间
+    QString lastUpdatedAt;       // ISO 8601 最后更新时间
+    qint64 ttlMs{-1};            // 存活时长（毫秒）；-1 = 无限制
+    qint64 pollIntervalMs{-1};   // 建议轮询间隔（毫秒）；-1 = 未提供
+    QJsonObject inputRequests;   // status == input_required：InputRequests map
+    QJsonObject result;          // status == completed：最终结果（结构同标准结果）
+    QJsonObject error;           // status == failed：JSON-RPC 错误
+    QJsonObject raw;             // 完整原始 JSON（永不丢弃）
+
+    bool isTerminal() const {
+        return status == QStringLiteral("completed")
+            || status == QStringLiteral("cancelled")
+            || status == QStringLiteral("failed");
+    }
+    bool empty() const { return taskId.isEmpty(); }
+
+    static McpQtTask fromJson(const QJsonObject& j) {
+        McpQtTask t;
+        t.raw = j;
+        t.taskId = j.value(QStringLiteral("taskId")).toString();
+        t.status = j.value(QStringLiteral("status")).toString();
+        t.statusMessage = j.value(QStringLiteral("statusMessage")).toString();
+        t.createdAt = j.value(QStringLiteral("createdAt")).toString();
+        t.lastUpdatedAt = j.value(QStringLiteral("lastUpdatedAt")).toString();
+        t.ttlMs = j.value(QStringLiteral("ttlMs")).toDouble(-1);
+        t.pollIntervalMs = j.value(QStringLiteral("pollIntervalMs")).toDouble(-1);
+        t.inputRequests = j.value(QStringLiteral("inputRequests")).toObject();
+        t.result = j.value(QStringLiteral("result")).toObject();
+        t.error = j.value(QStringLiteral("error")).toObject();
+        return t;
+    }
 };
 
 class McpQtClient;
@@ -91,6 +151,14 @@ public:
     McpQtClientBuilder& setHttpHeaders(const QMap<QString, QString>& headers);
     McpQtClientBuilder& setHttpProxy(const QNetworkProxy& proxy);
     McpQtClientBuilder& setReconnectPolicy(const mcp::McpReconnectPolicy& policy);
+    McpQtClientBuilder& setProtocolVersion(const QString& version);
+    McpQtClientBuilder& setStatelessMode(bool enabled);
+    /// MCP 2026-07-28 per-request logLevel（SEP-2577）：后续每个请求注入
+    /// _meta.io.modelcontextprotocol/logLevel。空字符串停止注入。
+    McpQtClientBuilder& setRequestLogLevel(const QString& level);
+    /// 设置 W3C trace context（分布式追踪）：连接建立后 traceparent/tracestate/baggage
+    /// 会随每个 HTTP 请求发送。
+    McpQtClientBuilder& setTraceContext(const McpTraceContext& ctx);
     std::shared_ptr<McpQtClient> buildAndConnectAndWait(QString* errorString = nullptr);
     std::shared_ptr<McpQtClient> buildAndConnectAsync();
 private:
@@ -100,7 +168,11 @@ private:
     QStringList m_args;
     QString m_clientName{QStringLiteral("mcp-qt-client")};
     QString m_clientVersion{QStringLiteral("1.0.0")};
+    QString m_protocolVersion{QStringLiteral("2026-07-28")};
+    bool m_statelessMode{false};
     int m_timeoutMs{10000};
+    QString m_requestLogLevel;  // 2026-07-28 per-request logLevel
+    McpTraceContext m_traceContext;  // W3C trace context
     QMap<QString, QString> m_env;
     QMap<QString, QString> m_httpHeaders;
     std::optional<QNetworkProxy> m_proxy;
@@ -198,6 +270,32 @@ public:
     QString negotiatedProtocolVersion() const;
     QString instructions() const;
 
+    void setStatelessMode(bool enabled);
+    bool isStatelessMode() const;
+    void setProtocolVersion(const QString& version);
+
+    // ========== Server Discover（2026-07-28, SEP-2575）==========
+
+    /// server/discover 结果
+    struct DiscoverInfo {
+        QStringList supportedVersions;
+        QJsonObject capabilities;
+        QJsonObject serverInfo;
+        QString instructions;
+        QString resultType;
+        qint64 ttlMs{-1};
+        QString cacheScope;
+        bool empty() const {
+            return supportedVersions.isEmpty() && serverInfo.isEmpty() && instructions.isEmpty();
+        }
+    };
+
+    /// 同步执行 server/discover（无状态模式下推荐在其它 RPC 前调用）
+    DiscoverInfo discoverServer(int timeoutMs = 10000);
+
+    /// 异步执行 server/discover
+    void discoverServerAsync(std::function<void(const DiscoverInfo& info, const QString& error)> callback);
+
     // 便捷能力检测
     bool hasToolsCapability() const;
     bool hasPromptsCapability() const;
@@ -214,6 +312,10 @@ public:
     std::vector<McpQtTool> listTools(int timeoutMs = 10000);
     std::vector<McpQtTool> listTools(const QString& cursor, QString* nextCursor = nullptr, int timeoutMs = 10000);
     std::vector<McpQtTool> fetchAllTools(int timeoutMs = 10000);
+
+    /// 带 CacheableResult 缓存提示（2026-07-28 ttlMs/cacheScope）的工具列表
+    std::vector<McpQtTool> listTools(McpCacheHint* hint, int timeoutMs = 10000);
+    std::vector<McpQtTool> listTools(const QString& cursor, QString* nextCursor, McpCacheHint* hint, int timeoutMs = 10000);
 
     /// 获取当前缓存在客户端中的所有工具列表（不触发网络请求）
     std::vector<McpQtTool> cachedTools() const;
@@ -260,6 +362,42 @@ public:
                             std::function<void(McpQtToolResult)> callback,
                             int timeoutMs = 10000);
 
+    // ========== Tasks 扩展（SEP-2663, io.modelcontextprotocol/tasks）==========
+
+    /// 注册 Tasks 扩展客户端能力声明：在 clientCapabilities.extensions 中声明
+    /// io.modelcontextprotocol/tasks（SEP-2133 扩展框架）。建议在连接前调用；
+    /// 连接后调用会同步推送到会话（对后续请求生效）。
+    void registerMcpTaskCapabilities();
+
+    /// 查询任务状态（tasks/get，异步）。error 非空表示协议错误（如任务不存在）。
+    void getTaskAsync(const QString& taskId, std::function<void(const McpQtTask& task, const QString& error)> callback);
+
+    /// 查询任务状态（tasks/get，同步，仅限非 GUI 线程）。
+    McpQtTask getTask(const QString& taskId, int timeoutMs = 10000);
+
+    /// 提交任务输入（tasks/update，异步）：满足 input_required 任务在 tasks/get
+    /// 响应 inputRequests 中列出的待处理请求（key -> 结果）。ack-only 确认。
+    void updateTaskAsync(const QString& taskId, const QJsonObject& inputResponses,
+                         std::function<void(bool success, const QString& error)> callback);
+
+    /// 提交任务输入（tasks/update，同步，仅限非 GUI 线程）。
+    bool updateTask(const QString& taskId, const QJsonObject& inputResponses, int timeoutMs = 10000);
+
+    /// 取消任务（tasks/cancel，异步）。取消是协作式的：服务器仅确认收到意图。
+    void cancelTaskAsync(const QString& taskId, std::function<void(bool success, const QString& error)> callback);
+
+    /// 取消任务（tasks/cancel，同步，仅限非 GUI 线程）。
+    bool cancelTask(const QString& taskId, int timeoutMs = 10000);
+
+    /// 调用工具并直接返回任务句柄（不自动轮询）。
+    /// 服务器返回 CreateTaskResult（resultType: "task"）时 task 非空；
+    /// 返回标准结果时 task.empty() 为 true 且 result 携带标准结果。
+    /// 需要任务生命周期管理（轮询/输入/取消）的应用使用此 API；
+    /// 普通 callToolAsync() 会自动透明轮询到终态。
+    void callToolTaskAsync(const QString& name, const QJsonObject& arguments,
+                           std::function<void(const McpQtTask& task, const McpResult& result, const QString& error)> callback,
+                           ProgressCallback onProgress = nullptr);
+
     // ========== 公开参数校验 API ==========
     /// 本地校验工具参数是否符合 Schema 要求
     bool validateToolArguments(const QString& name, const QJsonObject& arguments, QString* errorString = nullptr) const;
@@ -301,6 +439,10 @@ public:
     QJsonObject listResources(int timeoutMs = 10000);
     QJsonObject listResources(const QString& cursor, QString* nextCursor = nullptr, int timeoutMs = 10000);
     QJsonObject fetchAllResources(int timeoutMs = 10000);
+
+    /// 带 CacheableResult 缓存提示（2026-07-28 ttlMs/cacheScope）的资源列表
+    QJsonObject listResources(McpCacheHint* hint, int timeoutMs = 10000);
+    QJsonObject listResources(const QString& cursor, QString* nextCursor, McpCacheHint* hint, int timeoutMs = 10000);
 
     /// 异步获取资源列表
     void listResourcesAsync(const QString& cursor, std::function<void(const QJsonObject& result, const QString& nextCursor, const QString& error)> callback);
@@ -346,6 +488,10 @@ public:
     QJsonObject listPrompts(const QString& cursor, QString* nextCursor = nullptr, int timeoutMs = 10000);
     QJsonObject fetchAllPrompts(int timeoutMs = 10000);
 
+    /// 带 CacheableResult 缓存提示（2026-07-28 ttlMs/cacheScope）的提示词列表
+    QJsonObject listPrompts(McpCacheHint* hint, int timeoutMs = 10000);
+    QJsonObject listPrompts(const QString& cursor, QString* nextCursor, McpCacheHint* hint, int timeoutMs = 10000);
+
     /// 异步获取提示词列表
     void listPromptsAsync(const QString& cursor, std::function<void(const QJsonObject& result, const QString& nextCursor, const QString& error)> callback);
 
@@ -354,13 +500,27 @@ public:
 
     // ========== 其他（对齐 TS `ping()`, `complete()`, `setLoggingLevel()`）==========
 
+    /// 同步 ping。@deprecated in 2026-07-28（ping 已从规范移除；stateless 下直接失败并告警）
     bool ping(int timeoutMs = 5000);
+    /// 异步 ping。@deprecated in 2026-07-28
     void pingAsync(std::function<void(bool success, const QString& error)> callback);
 
     QJsonObject complete(const QJsonObject& ref, const QJsonObject& argument, int timeoutMs = 10000);
     void completeAsync(const QJsonObject& ref, const QJsonObject& argument, std::function<void(const QJsonObject& completion, const QString& error)> callback);
-    /// 设置服务端日志级别，发送 logging/setLevel 请求
+    /// 设置服务端日志级别，发送 logging/setLevel 请求。
+    /// @deprecated in 2026-07-28（logging/setLevel 已移除）；2026-07-28 下自动改用
+    ///             per-request logLevel（_meta.io.modelcontextprotocol/logLevel），建议直接使用 setRequestLogLevel()。
     bool setLoggingLevel(const QString& level, int timeoutMs = 5000);
+
+    /// MCP 2026-07-28 per-request logLevel（SEP-2577）：在后续每个请求的 _meta 注入
+    /// io.modelcontextprotocol/logLevel，服务端据此决定是否回传 notifications/message 日志。
+    /// 传空字符串停止注入。仅在 stateless / 2026-07-28 模式下生效。
+    void setRequestLogLevel(const QString& level);
+    QString requestLogLevel() const;
+
+    /// 设置 W3C trace context（分布式追踪）。可随时调用：立即更新后续 HTTP 请求头。
+    void setTraceContext(const McpTraceContext& ctx);
+    McpTraceContext traceContext() const;
 
     using TrafficLogger = std::function<void(const QJsonObject& event)>;
     void setTrafficLogger(TrafficLogger logger);
@@ -386,6 +546,7 @@ public:
      */
     void setRootsProvider(RootsProvider provider);
     void setRootsProvider(QObject* context, RootsProvider provider);
+    /// @deprecated in 2026-07-28（roots/list_changed 已移除；stateless 下不发送，仅告警）
     void notifyRootsListChanged();
 
     // ========== 通知（对齐 TS `notification()` 等）==========
@@ -395,6 +556,17 @@ public:
     void enableNotificationDebounce(const QString& method, int debounceMs = 100);
     /// 发送任意通知给服务端
     void sendNotification(const QString& method, const QJsonObject& params);
+
+    // ========== Subscriptions（2026-07-28, SEP-2330: subscriptions/listen）==========
+
+    /// 异步订阅服务端通知（subscriptions/listen）。订阅通知经由现有 notificationReceived 信号派发。
+    void listenSubscriptionsAsync(const QJsonObject& filter, std::function<void(bool success, const QString& error)> cb);
+
+    /// 同步订阅服务端通知（subscriptions/listen），阻塞等待响应。
+    bool listenSubscriptions(const QJsonObject& filter, int timeoutMs = 10000);
+
+    /// 取消订阅（发送 notifications/cancelled；HTTP 流关闭由 transport 负责）
+    void cancelSubscription(int64_t requestId);
 
     /// 发送请求（异步，对齐 TS `client.request()`）。返回 requestId，可用于 cancelRequest
     int64_t sendRequest(const QString& method, const QJsonObject& params,
@@ -413,6 +585,11 @@ public:
 
     void registerCapability(const QString& name, const QJsonObject& config);
     void setClientCapabilities(const QJsonObject& caps);
+
+    /// 注册 MCP Apps（io.modelcontextprotocol/ui）客户端能力声明：
+    /// 在 clientCapabilities.extensions 中声明支持渲染 text/html;profile=mcp-app。
+    /// 2026-07-28 扩展框架（SEP-2133）。渲染本身由 mcp_qt_apps 模块提供。
+    void registerMcpAppCapabilities();
 
     // ========== 生命周期与重连（对齐 TS `close()`）==========
 
@@ -443,6 +620,13 @@ signals:
     void disconnected();
     void errorOccurred(const mcp_qt::McpError& error);
     
+    /// MCP 2026-07-28 MRTR: 服务端返回 input_required，请求客户端补全输入后再重试原请求。
+    /// requestId: 待补全请求的 JSON-RPC id；inputRequests: 规范 InputRequests map
+    /// （key -> {method, params}）；requestState: 服务端 opaque 状态，重试时必须原样回显。
+    /// 调用 replyCallback 时传入 InputResponses map（key -> 对应结果），库会自动完成重试。
+    void inputRequired(const QString& requestId, const QJsonObject& inputRequests,
+                       const QString& requestState, mcp_qt::MrtrReplyCallback replyCallback);
+
     /// 收到服务端的任意通知
     void notificationReceived(const QString& method, const QJsonObject& params);
     // 协议规范事件：服务端列表变更通知
@@ -467,17 +651,16 @@ private:
 
     
     void doInitializeAsync(const QString& clientName, const QString& clientVersion);
+    void doDiscoverAsync();
     void setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> transport);
 
     bool doInitializeAndWait(const QString& clientName, const QString& clientVersion, int timeoutMs, QString* errorString = nullptr);
-    bool doOAuth(const OAuthConfig& oauth);
 
 
 
 
     std::shared_ptr<mcp::McpClientSession> m_session;
     std::shared_ptr<mcp::McpOAuthClient> m_oauth;
-    bool m_initialized{false};
     mutable std::map<QString, McpQtTool> m_toolCache;
 
     TrafficLogger m_trafficLogger;
@@ -499,7 +682,12 @@ private:
     std::optional<QNetworkProxy> m_proxy;
     QString m_clientName{QStringLiteral("mcp-qt-client")};
     QString m_clientVersion{QStringLiteral("1.0.0")};
+    QString m_protocolVersion{QStringLiteral("2026-07-28")};
+    bool m_statelessMode{false};
     int m_timeoutMs{10000};
+    QString m_requestLogLevel;  // 2026-07-28 per-request logLevel
+    McpTraceContext m_traceContext;  // W3C trace context（traceparent/tracestate/baggage）
+    std::shared_ptr<mcp::IMcpTransport> m_transport;  // 当前传输层引用（trace 头动态更新用）
 
     mcp::McpReconnectPolicy m_reconnectPolicy;
     class QTimer* m_reconnectTimer{nullptr};
@@ -515,12 +703,6 @@ private:
     };
     QList<NotificationHandlerEntry> m_savedNotificationHandlers;
     
-    struct CapabilityHandlerEntry {
-        QPointer<QObject> context;
-        void* handler; // Type-erased, casted when used, or we can use specific fields
-        bool hasContext;
-    };
-    
     SamplingHandler m_savedSamplingHandler{nullptr};
     QPointer<QObject> m_savedSamplingContext;
     bool m_hasSavedSamplingContext{false};
@@ -535,9 +717,6 @@ private:
 
     std::function<std::shared_ptr<mcp::IMcpTransport>()> m_transportFactory;
     QList<QPointer<McpToolsModel>> m_toolsModels;
-    QList<QPointer<McpPromptsModel>> m_promptsModels;
-    QList<QPointer<McpResourcesModel>> m_resourcesModels;
-    QList<QPointer<McpResourceTemplatesModel>> m_templatesModels;
 
     struct ReplayableRequest {
         QString method;
@@ -572,6 +751,16 @@ private:
 
     template <typename Initiator>
     bool runSyncWithTimeout(Initiator&& initiator, int timeoutMs);
+
+    // Tasks 扩展（SEP-2663）：透明轮询任务直到终态（异步，QTimer 驱动，尊重 pollIntervalMs）
+    void pollTaskToCompletion(const QString& taskId, int pollIntervalMs, int timeoutMs,
+                              std::function<void(const McpQtTask& task)> done);
+    // Tasks 扩展：把任务终态转换为 McpResult（透明路径用）
+    static McpResult taskToResult(const McpQtTask& task);
+    // callTool 内部实现：pollTimeoutMs > 0 时任务透明轮询受该上限约束（同步路径用）
+    void callToolAsyncImpl(const QString& name, const QJsonObject& arguments, QObject* ctx,
+                           std::function<void(McpResult)> callback, ProgressCallback onProgress,
+                           int pollTimeoutMs);
 };
 
 } // namespace mcp_qt

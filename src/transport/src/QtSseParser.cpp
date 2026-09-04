@@ -7,7 +7,6 @@ namespace mcp_qt {
 void QtSseParser::setEventCallback(EventCallback callback) { m_eventCallback = std::move(callback); }
 void QtSseParser::setRetryCallback(RetryCallback callback) { m_retryCallback = std::move(callback); }
 void QtSseParser::setIdCallback(IdCallback callback) { m_idCallback = std::move(callback); }
-void QtSseParser::reset() { m_buffer.clear(); }
 
 void QtSseParser::pushChunk(const std::string& chunk) {
     m_buffer += chunk;

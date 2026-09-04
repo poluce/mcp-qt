@@ -65,6 +65,10 @@ QList<McpServerConfig> McpJsonConfigLoader::load() {
             cfg.nameSpace = serverCfg.value(QStringLiteral("namespace")).toString();
         }
 
+        if (serverCfg.contains(QStringLiteral("protocolVersion"))) {
+            cfg.protocolVersion = serverCfg.value(QStringLiteral("protocolVersion")).toString();
+        }
+
         if (serverCfg.contains(QStringLiteral("env")) && serverCfg.value(QStringLiteral("env")).isObject()) {
             QJsonObject envs = serverCfg.value(QStringLiteral("env")).toObject();
             for (auto envIt = envs.constBegin(); envIt != envs.constEnd(); ++envIt) {

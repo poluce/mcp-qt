@@ -10,6 +10,8 @@
 #include <mcp_qt_client/McpQtClient.h>
 #include <mcp_qt_client/IMcpConfigLoader.h>
 
+class QProcessEnvironment;
+
 namespace mcp_qt {
 
 enum class McpServerState {
@@ -69,6 +71,10 @@ signals:
     void clientPromptsChanged(const QString& serverName);
     void clientStateChanged(const QString& serverName, mcp_qt::McpServerState state);
 
+    /// 某个服务器由于 MRTR 需要用户补充输入（2026-07-28 规范 InputRequests map + requestState）
+    void clientInputRequired(const QString& serverName, const QString& requestId,
+                             const QJsonObject& inputRequests, const QString& requestState,
+                             mcp_qt::MrtrReplyCallback replyCallback);
     /// 某个服务器的工具预热完成（首次连接后的 fetchAllToolsAsync 完成）
     void clientToolsReady(const QString& serverName, int toolCount);
     /// 所有已注册服务器的工具预热全部完成
@@ -76,8 +82,13 @@ signals:
 
 private:
     static QString interpolateEnv(const QString& value);
+    static QString interpolateEnv(const QString& value, const QProcessEnvironment& env);
     static void configureBuilder(McpQtClientBuilder& builder, const McpServerConfig& cfg);
     void processHttpServerConfig(const McpServerConfig& cfg);
+    /// 协议自动探测：protocolVersion 未显式指定时，POST server/discover(2026-07-28)
+    /// 试探服务器——支持则用无状态模式，否则回退旧协议(2025-11-25)。
+    void probeProtocolVersion(const McpServerConfig& cfg,
+                              std::function<void(const McpServerConfig&)> done);
     void setupClientSignals(const QString& serverName, const std::shared_ptr<McpQtClient>& client);
     void warmupClientTools(const QString& serverName, const std::shared_ptr<McpQtClient>& client);
     void updateServerState(const QString& serverName, McpServerState state);
