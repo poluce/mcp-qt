@@ -356,6 +356,33 @@ MCP_LOG_INFO_MOD("McpHost", "Starting MCP Host...");
 
 注意：文件输出是**显式开启**的——不调用 `setLogFile` 不会产生任何日志文件；路径完全由调用方指定。
 
+### Tasks 长任务（SEP-2663）
+
+服务器工具可返回 `CreateTaskResult`（`resultType: "task"`）表示长任务。SDK 提供两种使用方式：
+
+```cpp
+// 方式一：透明轮询（推荐）——callTool 自动轮询到终态，调用方无感知
+client->callToolAsync("long_task", {{"duration", 30}}, [](McpResult r) {
+    // 任务完成后回调，r.data 为最终结果（尊重服务器 pollIntervalMs）
+});
+
+// 方式二：任务句柄——拿到 taskId 手动管理（轮询/提交输入/取消）
+client->callToolTaskAsync("long_task", {{"duration", 30}},
+    [](const QString& taskId, const QString& error) {
+        // 拿到 taskId 后：
+        client->getTaskAsync(taskId, [](const McpQtTask& task, const QString& err) {
+            // task.status: working / input_required / completed / failed / cancelled
+        });
+        client->updateTaskAsync(taskId, {{"key", "value"}}, ...);  // 提交 input_required 输入
+        client->cancelTaskAsync(taskId, ...);                       // 取消任务
+    });
+
+// 能力声明（连接前调用）
+client->registerMcpTaskCapabilities();
+```
+
+任务状态机：`working → input_required（需 updateTask 提交输入）→ completed / failed / cancelled`。`McpQtTask` 携带 `statusMessage`/`createdAt`/`lastUpdatedAt`/`pollIntervalMs`/`inputRequests`/`result` 全字段。
+
 ### 类型化工具结果
 
 无缝解析复合型工具返回，自动解码 Base64 图片，**始终保留原始 JSON**：
@@ -425,5 +452,5 @@ QObject::connect(client.get(), &McpQtClient::reconnected, []{ qDebug() << "通�
 *   **JWT-Bearer Grant Type**：✅ 已支持 **ES256（P-256）**（`private_key_pem` → RFC 7523 client assertion，Windows BCrypt / 非 Windows OpenSSL；`auth/client-credentials-jwt` conformance 已验证通过 8/8）；RS256 与 ECDSA P-384/P-521 未实现
 *   **OAuth 端点回退**：旧场景 `auth/2025-03-26-oauth-endpoint-fallback` 的早期 PRM 猜解回退未实现（已加入 `conformance-baseline.yml`）
 *   **MCP Apps 渲染**：默认后端为 WebView2（Windows）；当前 `ui://` 资源获取支持 HTTP/相对地址解析，复杂 AppBridge 能力（工具调用代理、权限策略细化）为可扩展预留
-*   **扩展生态**：Tasks（`io.modelcontextprotocol/tasks`）、EMA、DPoP、WIF 等扩展未实现（非核心协议 MUST）
+*   **扩展生态**：EMA、DPoP、WIF 等扩展未实现（非核心协议 MUST）；Tasks（`io.modelcontextprotocol/tasks`）✅ 已实现（见"Tasks 长任务"）
 *   **环境性旧场景失败**：`sse-retry`（重连时序）、部分旧 auth 场景在未改动的 master 上同样存在，非本分支回归
