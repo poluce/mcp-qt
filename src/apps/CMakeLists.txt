@@ -26,9 +26,19 @@ target_include_directories(mcp_qt_apps PUBLIC
 )
 
 # WebView2 SDK（动态加载 WebView2Loader.dll，仅需 COM 头文件）
-target_include_directories(mcp_qt_apps PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/webview2/sdk/build/native/include
-)
+# 定位策略：
+# 1. 宿主可注入 MCP_QT_WEBVIEW2_INCLUDE_DIR 缓存变量（submodule 嵌入场景）；
+# 2. 否则用 CMAKE_CURRENT_SOURCE_DIR 相对定位——不能用 CMAKE_SOURCE_DIR，
+#    submodule 嵌入宿主时它是宿主根，路径错位导致 WebView2.h 找不到（issue #11）。
+set(MCP_QT_WEBVIEW2_INCLUDE_DIR "" CACHE PATH "WebView2 SDK 头文件目录（宿主可注入）")
+if(MCP_QT_WEBVIEW2_INCLUDE_DIR)
+    target_include_directories(mcp_qt_apps PRIVATE ${MCP_QT_WEBVIEW2_INCLUDE_DIR})
+else()
+    # CMAKE_CURRENT_SOURCE_DIR = <mcp-qt>/src/apps，回仓库根需 ../../（→ <mcp-qt>/third_party）
+    target_include_directories(mcp_qt_apps PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/webview2/sdk/build/native/include
+    )
+endif()
 
 target_compile_options(mcp_qt_apps PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
