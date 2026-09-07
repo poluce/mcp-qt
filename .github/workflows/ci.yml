@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Configure
         run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
@@ -31,14 +31,18 @@ jobs:
         run: cmake --build build --target tests_qt -j 8
 
       - name: Run tests_qt
-        run: ./build/build_test/tests_qt.exe
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIRin;" + $env:PATH
+          ./build/build_test/tests_qt.exe
 
       - name: Build e2e
         run: cmake --build build --target tests_qt_apps_e2e -j 8
 
       # e2e 测试自带 node mock 服务器（test/mcp_apps_server.js，QProcess 拉起）
       - name: Run e2e
-        run: ./build/build_test/tests_qt_apps_e2e.exe
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIRin;" + $env:PATH
+          ./build/build_test/tests_qt_apps_e2e.exe
 
   # 官方 conformance 2026-07-28 客户端套件（draft + auth，发布门槛）
   conformance:
@@ -57,7 +61,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Configure
         run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
@@ -66,7 +70,11 @@ jobs:
         run: cmake --build build --target mcp_client_conformance_qt -j 8
 
       - name: Run draft suite
-        run: npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build/conformance_runner_qt/mcp_client_conformance_qt --suite draft
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIRin;" + $env:PATH
+          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build/conformance_runner_qt/mcp_client_conformance_qt --suite draft
 
       - name: Run auth suite
-        run: npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build/conformance_runner_qt/mcp_client_conformance_qt --suite auth
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIRin;" + $env:PATH
+          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build/conformance_runner_qt/mcp_client_conformance_qt --suite auth
