@@ -31,9 +31,11 @@ jobs:
         run: cmake --build build --target tests_qt -j 8
 
       - name: Run tests_qt
+        shell: cmd
         run: |
-          $env:PATH = "$env:QT_ROOT_DIR\bin;" + $env:PATH
-          ./build/build_test/tests_qt.exe
+          set PATH=%QT_ROOT_DIR%\bin;%PATH%
+          build\build_test\tests_qt.exe
+          echo EXITCODE=%ERRORLEVEL%
 
       - name: Build e2e
         run: cmake --build build --target tests_qt_apps_e2e -j 8
@@ -72,9 +74,9 @@ jobs:
       - name: Run draft suite
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;" + $env:PATH
-          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build/conformance_runner_qt/mcp_client_conformance_qt --suite draft
+          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build\conformance_runner_qt\mcp_client_conformance_qt --suite draft
 
       - name: Run auth suite
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;" + $env:PATH
-          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build/conformance_runner_qt/mcp_client_conformance_qt --suite auth
+          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build\conformance_runner_qt\mcp_client_conformance_qt --suite auth
