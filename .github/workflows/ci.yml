@@ -33,7 +33,9 @@ jobs:
       - name: Run tests_qt
         shell: cmd
         run: |
-          set PATH=%QT_ROOT_DIR%\bin;%PATH%
+          rem Qt bin 追加而非前置：工具链的 MinGW 运行时 DLL（libstdc++ 等）必须优先，
+          rem 否则 Qt 包自带的旧版运行时会导致 0xC0000139 入口点未找到
+          set PATH=%PATH%;%QT_ROOT_DIR%\bin
           build\build_test\tests_qt.exe
           echo EXITCODE=%ERRORLEVEL%
 
@@ -43,7 +45,7 @@ jobs:
       # e2e 测试自带 node mock 服务器（test/mcp_apps_server.js，QProcess 拉起）
       - name: Run e2e
         run: |
-          $env:PATH = "$env:QT_ROOT_DIR\bin;" + $env:PATH
+          $env:PATH = $env:PATH + ";$env:QT_ROOT_DIR\bin"
           ./build/build_test/tests_qt_apps_e2e.exe
 
   # 官方 conformance 2026-07-28 客户端套件（draft + auth，发布门槛）
@@ -73,10 +75,11 @@ jobs:
 
       - name: Run draft suite
         run: |
-          $env:PATH = "$env:QT_ROOT_DIR\bin;" + $env:PATH
+          # Qt bin 追加而非前置：工具链 MinGW 运行时 DLL 必须优先（0xC0000139 防护）
+          $env:PATH = $env:PATH + ";$env:QT_ROOT_DIR\bin"
           npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build\conformance_runner_qt\mcp_client_conformance_qt --suite draft
 
       - name: Run auth suite
         run: |
-          $env:PATH = "$env:QT_ROOT_DIR\bin;" + $env:PATH
+          $env:PATH = $env:PATH + ";$env:QT_ROOT_DIR\bin"
           npx -y @modelcontextprotocol/conformance@0.2.0-alpha.10 client --command build\conformance_runner_qt\mcp_client_conformance_qt --suite auth
