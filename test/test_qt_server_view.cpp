@@ -115,3 +115,51 @@ void test_qt_server_view_schema_export() {
     QJsonArray resources = view.exportAllResources();
     TM_ASSERT_EQ(resources.size(), 0, "resources export should not crash and be empty for mock");
 }
+
+void test_qt_server_view_call_isolation() {
+    mcp_qt::McpHost host;
+
+    auto mockA = mcp_qt::McpQtClient::createForTest(&host);
+    host.manager()->registerClient(QStringLiteral("server-a"), mockA);
+    auto mockB = mcp_qt::McpQtClient::createForTest(&host);
+    host.manager()->registerClient(QStringLiteral("server-b"), mockB);
+
+    mcp_qt::McpQtTool ta{QStringLiteral("echo"), QStringLiteral("echo tool"), QJsonObject{}};
+    emit mockA->toolsChanged({ta});
+    mcp_qt::McpQtTool tb{QStringLiteral("fetch"), QStringLiteral("fetch tool"), QJsonObject{}};
+    emit mockB->toolsChanged({tb});
+
+    // 视图只可见 server-a：调用 server-b 的工具必须被同步拒绝，不发请求
+    mcp_qt::McpServerView viewA(&host);
+    viewA.setVisibleServers({QStringLiteral("server-a")});
+
+    bool called = false;
+    mcp_qt::McpResult res;
+    viewA.callToolAsync(QStringLiteral("server-b_fetch"), QJsonObject{}, [&](mcp_qt::McpResult r) {
+        called = true;
+        res = r;
+    });
+    TM_ASSERT_TRUE(called, "cross-view tool call should be rejected synchronously");
+    TM_ASSERT_TRUE(res.isError, "cross-view tool call should return error");
+    TM_ASSERT_TRUE(res.errorString.contains(QStringLiteral("not visible")),
+                   "error should mention visibility");
+
+    // 未知命名空间同样拒绝
+    called = false;
+    viewA.callToolAsync(QStringLiteral("unknown_tool"), QJsonObject{}, [&](mcp_qt::McpResult r) {
+        called = true;
+        res = r;
+    });
+    TM_ASSERT_TRUE(called && res.isError, "unknown namespace should be rejected");
+
+    // 同步 getPrompt/readResource 越界返回 error 对象
+    QJsonObject p = viewA.getPrompt(QStringLiteral("server-b_p"), QJsonObject{});
+    TM_ASSERT_TRUE(p.contains(QStringLiteral("error")), "cross-view getPrompt should return error");
+    QJsonObject r = viewA.readResource(QStringLiteral("mcp-server-b-uri"));
+    TM_ASSERT_TRUE(r.contains(QStringLiteral("error")), "cross-view readResource should return error");
+
+    // 空列表 = 全部可见：不拒绝（mock client 无 session，返回空对象而非 error）
+    viewA.setVisibleServers({});
+    QJsonObject p2 = viewA.getPrompt(QStringLiteral("server-b_p"), QJsonObject{});
+    TM_ASSERT_FALSE(p2.contains(QStringLiteral("error")), "empty visible list should not reject");
+}

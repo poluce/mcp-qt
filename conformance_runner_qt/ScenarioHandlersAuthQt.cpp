@@ -225,7 +225,9 @@ static int _raQt(const RunnerConfig& c, bool ct) {
 
     QEventLoop loop;
     bool hasError = false;
-    cl->listToolsAsync("", [&](const std::vector<mcp_qt::McpQtTool>&, const QString&, const QString& err) {
+    std::vector<mcp_qt::McpQtTool> tools;
+    cl->listToolsAsync("", [&](const std::vector<mcp_qt::McpQtTool>& t, const QString&, const QString& err) {
+        tools = t;
         hasError = !err.isEmpty();
         loop.quit();
     });
@@ -234,8 +236,13 @@ static int _raQt(const RunnerConfig& c, bool ct) {
     if (hasError) return 1;
 
     if (ct) {
-        auto res = cl->callTool("get_system_time", QJsonObject{});
-        if (res.isError) return 1;
+        // 冒烟调用（best-effort）：优先用服务器实际列出的第一个工具
+        // （pre-registration 等场景工具集不同，硬编码名会收到 -32602）；
+        // 无工具的服务器（scope-step-up 等场景 tools/list 返回空数组）回退
+        // 硬编码名以触发 403 挑战流程。结果不判失败——场景 checks 才是验证
+        // 依据（scope-step-up 重试后 200 响应体仍可能是 -32602 工具不存在）。
+        QString toolName = tools.empty() ? QStringLiteral("get_system_time") : tools[0].name;
+        cl->callTool(toolName, QJsonObject{});
     }
     return 0;
 }

@@ -33,3 +33,31 @@ void test_qt_connect_stdio_integration() {
         client->close();
     }
 }
+
+void test_qt_session_exact_request_id_cancel() {
+    // 请求方法返回精确 id：取消只影响目标请求，不影响并发中的其它请求
+    auto transport = std::make_shared<MockTransport>();
+    auto session = mcp::McpClientSession::connect(transport);
+
+    bool cb1 = false, cb2 = false;
+    int64_t id1 = session->sendRequest("tools/list", nlohmann::json::object(),
+                                       [&](const nlohmann::json&, const nlohmann::json&) { cb1 = true; });
+    int64_t id2 = session->sendRequest("prompts/list", nlohmann::json::object(),
+                                       [&](const nlohmann::json&, const nlohmann::json&) { cb2 = true; });
+    TM_ASSERT_TRUE(id1 > 0 && id2 > 0 && id1 != id2, "each request should return a distinct id");
+
+    // 取消 id1：cb1 收到 cancelled 错误，cb2 不受影响
+    session->cancelRequest(id1);
+    TM_ASSERT_TRUE(cb1, "cancelled request callback should fire with error");
+    TM_ASSERT_FALSE(cb2, "other in-flight request should be unaffected");
+
+    // 响应 id2：cb2 正常完成
+    nlohmann::json resp = {{"jsonrpc", "2.0"}, {"id", id2}, {"result", nlohmann::json::object()}};
+    {
+        std::lock_guard<std::mutex> lock(transport->m_state->mutex);
+        if (transport->m_state->onMessage) {
+            transport->m_state->onMessage(resp.dump());
+        }
+    }
+    TM_ASSERT_TRUE(cb2, "uncancelled request should complete normally");
+}

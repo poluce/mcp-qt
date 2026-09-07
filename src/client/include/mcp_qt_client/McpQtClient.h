@@ -29,6 +29,7 @@
 
 namespace mcp {
 class McpClientSession;
+class McpStatelessSession;
 class McpOAuthClient;
 class IMcpTransport;
 }
@@ -194,6 +195,11 @@ private:
  *   c->callTool("add", {{"a",5},{"b",3}});
  *   c->setLoggingLevel("debug");
  * @endcode
+ *
+ * 同步 API 弃用说明（终态架构 §4）：全部同步方法（callTool/listTools/
+ * getPrompt/readResource/ping/complete/discoverServer/getTask 等）计划在
+ * 2.0 移除。过渡期仅限脚本/测试使用：禁止 GUI 线程调用，禁止在回调中
+ * 嵌套同步调用。新代码一律使用对应的 *Async 方法。
  */
 class McpQtClient : public QObject {
     Q_OBJECT
@@ -290,7 +296,9 @@ public:
         }
     };
 
-    /// 同步执行 server/discover（无状态模式下推荐在其它 RPC 前调用）
+    /// 同步执行 server/discover（无状态模式下推荐在其它 RPC 前调用）。
+    /// @deprecated 同步 API 计划在 2.0 移除（终态架构 §4）：仅限脚本/测试，
+    /// 禁止 GUI 线程调用，禁止在回调中嵌套同步调用。新代码请用 discoverServerAsync。
     DiscoverInfo discoverServer(int timeoutMs = 10000);
 
     /// 异步执行 server/discover
@@ -370,21 +378,22 @@ public:
     void registerMcpTaskCapabilities();
 
     /// 查询任务状态（tasks/get，异步）。error 非空表示协议错误（如任务不存在）。
-    void getTaskAsync(const QString& taskId, std::function<void(const McpQtTask& task, const QString& error)> callback);
+    /// 返回本次请求 id（0 = 未发出），可用于 cancelRequest 精确取消。
+    int64_t getTaskAsync(const QString& taskId, std::function<void(const McpQtTask& task, const QString& error)> callback);
 
     /// 查询任务状态（tasks/get，同步，仅限非 GUI 线程）。
     McpQtTask getTask(const QString& taskId, int timeoutMs = 10000);
 
     /// 提交任务输入（tasks/update，异步）：满足 input_required 任务在 tasks/get
     /// 响应 inputRequests 中列出的待处理请求（key -> 结果）。ack-only 确认。
-    void updateTaskAsync(const QString& taskId, const QJsonObject& inputResponses,
-                         std::function<void(bool success, const QString& error)> callback);
+    int64_t updateTaskAsync(const QString& taskId, const QJsonObject& inputResponses,
+                            std::function<void(bool success, const QString& error)> callback);
 
     /// 提交任务输入（tasks/update，同步，仅限非 GUI 线程）。
     bool updateTask(const QString& taskId, const QJsonObject& inputResponses, int timeoutMs = 10000);
 
     /// 取消任务（tasks/cancel，异步）。取消是协作式的：服务器仅确认收到意图。
-    void cancelTaskAsync(const QString& taskId, std::function<void(bool success, const QString& error)> callback);
+    int64_t cancelTaskAsync(const QString& taskId, std::function<void(bool success, const QString& error)> callback);
 
     /// 取消任务（tasks/cancel，同步，仅限非 GUI 线程）。
     bool cancelTask(const QString& taskId, int timeoutMs = 10000);
@@ -660,6 +669,9 @@ private:
 
 
     std::shared_ptr<mcp::McpClientSession> m_session;
+    // stateless 模式下的会话（终态架构 §3）：与 m_session 同一对象，
+    // 仅用于访问 stateless 专属 API（discover/Tasks/subscriptions/MRTR）
+    std::shared_ptr<mcp::McpStatelessSession> m_statelessSession;
     std::shared_ptr<mcp::McpOAuthClient> m_oauth;
     mutable std::map<QString, McpQtTool> m_toolCache;
 
@@ -758,9 +770,10 @@ private:
     // Tasks 扩展：把任务终态转换为 McpResult（透明路径用）
     static McpResult taskToResult(const McpQtTask& task);
     // callTool 内部实现：pollTimeoutMs > 0 时任务透明轮询受该上限约束（同步路径用）
-    void callToolAsyncImpl(const QString& name, const QJsonObject& arguments, QObject* ctx,
-                           std::function<void(McpResult)> callback, ProgressCallback onProgress,
-                           int pollTimeoutMs);
+    // 返回本次请求 id（0 = 未发出），同步路径超时按 id 精确取消。
+    int64_t callToolAsyncImpl(const QString& name, const QJsonObject& arguments, QObject* ctx,
+                              std::function<void(McpResult)> callback, ProgressCallback onProgress,
+                              int pollTimeoutMs);
 };
 
 } // namespace mcp_qt

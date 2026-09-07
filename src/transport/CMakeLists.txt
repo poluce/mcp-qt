@@ -4,9 +4,15 @@ add_library(mcp_qt_transport STATIC
     include/mcp_qt_transport/QtHttpSseTransport.h
     include/mcp_qt_transport/QtProcessStdioTransport.h
     include/mcp_qt_transport/QtStatelessHttpTransport.h
+    include/mcp_qt_transport/McpIoContext.h
     src/QtHttpSseTransport.cpp
     src/QtProcessStdioTransport.cpp
+    src/QtProcessStdioWorker.h
+    src/QtProcessStdioWorker.cpp
     src/QtStatelessHttpTransport.cpp
+    src/QtStatelessHttpWorker.h
+    src/QtStatelessHttpWorker.cpp
+    src/McpIoContext.cpp
     src/QtHttpSseWorker.h
     src/QtHttpSseWorker.cpp
     src/QtSseParser.h

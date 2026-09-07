@@ -2,18 +2,22 @@
 
 #include <mcp_core/IMcpTransport.h>
 #include <QObject>
-#include <QProcess>
 #include <memory>
 #include <string>
 #include <vector>
-#include <mutex>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include <unordered_map>
 
 namespace mcp_qt {
 
+class QtProcessStdioWorker;
+
+/**
+ * @brief 子进程 stdio 传输（终态架构 §2.1）。
+ *
+ * QProcess 与子进程管理全部运行在 McpIoContext 共享 I/O 线程（内部 worker），
+ * 回调经 queued 连接投递回本对象所在线程；本对象只是线程安全的配置/回调句柄。
+ * Windows 上 CreateJobObject 保证子进程随父进程退出。
+ */
 class QtProcessStdioTransport : public QObject, public mcp::IMcpTransport {
     Q_OBJECT
 public:
@@ -34,29 +38,17 @@ signals:
     /// 子进程 stderr 输出（服务端日志），与 onError（传输层故障）分离
     void serverLog(const QString& message);
 
-private slots:
-    void handleReadyReadStandardOutput();
-    void handleReadyReadStandardError();
-    void handleProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
-    void handleProcessError(QProcess::ProcessError error);
-
 private:
     std::string m_command;
     std::vector<std::string> m_args;
     std::unordered_map<std::string, std::string> m_env;
-    QProcess* m_process;
-    
+
     std::function<void(const std::string&)> m_onMessage;
     std::function<void()> m_onClose;
     std::function<void(const std::string&)> m_onError;
-    
-    std::string m_buffer;
-    std::mutex m_mutex;
-    bool m_started{false};
 
-#ifdef _WIN32
-    void* m_jobObject = nullptr;
-#endif
+    bool m_started{false};
+    QtProcessStdioWorker* m_worker{nullptr};
 };
 
 } // namespace mcp_qt

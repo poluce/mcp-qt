@@ -1,4 +1,5 @@
 #include <mcp_qt_client/McpToolRouter.h>
+#include <mcp_qt_client/McpNamespace.h>
 #include <mcp_qt_client/McpServerManager.h>
 #include <QDebug>
 
@@ -27,18 +28,13 @@ QPair<QString, QString> McpToolRouter::parseToolName(const QString& nameSpacedTo
         return {};
     }
 
-    // 遍历所有已注册的 serverNames 尝试进行前缀匹配
-    // 这种做法可兼容 serverName 中包含 "_" 字符的情况
-    QStringList servers = m_manager->serverNames();
-    for (const QString& serverName : servers) {
-        QString prefix = serverName + QStringLiteral("_");
-        if (nameSpacedToolName.startsWith(prefix)) {
-            QString originalToolName = nameSpacedToolName.mid(prefix.length());
-            return {serverName, originalToolName};
-        }
+    // 前缀解析收敛（终态架构 §4）：主路径走 McpNamespace 单一实现
+    auto parsed = McpNamespace::parseNamespacedName(m_manager->serverNames(), nameSpacedToolName);
+    if (!parsed.first.isEmpty()) {
+        return parsed;
     }
 
-    // 后备方案：以第一个 "_" 为界进行分割
+    // 后备方案：以第一个 "_" 为界进行分割（legacy 兼容）
     int index = nameSpacedToolName.indexOf(QStringLiteral("_"));
     if (index > 0) {
         QString serverName = nameSpacedToolName.left(index);

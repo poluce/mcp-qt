@@ -1,6 +1,7 @@
 #include "RunnerConfig.h"
 #include "ConsoleStdioTransport.h"
 #include <mcp_core/McpClientSession.h>
+#include <mcp_core/McpStatelessSession.h>
 #include <nlohmann/json.hpp>
 #include <iostream>
 
@@ -8,7 +9,7 @@ namespace mcp_conformance {
 
 int runStateless20260728(const RunnerConfig& config) {
     auto transport = std::make_shared<mcp::ConsoleStdioTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(transport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(transport);
     session->init();
     if (!session->start()) return 1;
 

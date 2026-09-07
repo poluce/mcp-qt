@@ -1,5 +1,6 @@
 #include "RunnerConfig.h"
 #include <mcp_core/McpClientSession.h>
+#include <mcp_core/McpStatelessSession.h>
 #include <mcp_qt_transport/QtStatelessHttpTransport.h>
 #include <nlohmann/json.hpp>
 #include <QEventLoop>
@@ -29,7 +30,7 @@ int runStateless20260728Http(const RunnerConfig& config) {
     auto transport = std::make_shared<mcp_qt::QtStatelessHttpTransport>(QString::fromStdString(url));
     transport->setProtocolVersion("2026-07-28");
 
-    auto session = std::make_shared<mcp::McpClientSession>(transport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(transport);
     session->init();
     if (!session->start()) {
         std::cerr << "[FAIL] transport start failed" << std::endl;

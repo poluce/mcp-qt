@@ -1,4 +1,5 @@
 #include "mcp_qt_transport/QtHttpSseTransport.h"
+#include "mcp_qt_transport/McpIoContext.h"
 
 #include "QtHttpSseWorker.h"
 
@@ -20,7 +21,6 @@ public:
     TokenProvider tokenProvider;
     AuthRetryHandler authRetryHandler;
     QtHttpRequestConfig requestConfig;
-    QThread* thread{nullptr};
     QtHttpSseWorker* worker{nullptr};
     bool running{false};
 };
@@ -36,15 +36,15 @@ bool QtHttpSseTransport::start() {
     if (m_impl->running) {
         return false;
     }
-    m_impl->thread = new QThread();
+    // worker 移入共享 I/O 线程（终态架构 §2.1），不再每 transport 一条线程。
     m_impl->worker = new QtHttpSseWorker(QString::fromStdString(m_impl->url));
-    m_impl->worker->moveToThread(m_impl->thread);
+    m_impl->worker->moveToThread(McpIoContext::shared()->thread());
     m_impl->worker->setProtocolVersion(QString::fromStdString(m_impl->protocolVersion));
     m_impl->worker->setTokenProvider(m_impl->tokenProvider);
     m_impl->worker->setAuthRetryHandler(m_impl->authRetryHandler);
     m_impl->worker->setRequestConfig(m_impl->requestConfig);
 
-    QObject::connect(m_impl->thread, &QThread::started, m_impl->worker, &QtHttpSseWorker::startStream);
+    // 回调经 queued 连接投递回本对象所在线程（session 单线程运行在 client 线程）
     QObject::connect(m_impl->worker, &QtHttpSseWorker::messageReceived, [this](const QString& msg) {
         if (m_impl->onMessage) m_impl->onMessage(msg.toStdString());
     });
@@ -54,21 +54,8 @@ bool QtHttpSseTransport::start() {
     QObject::connect(m_impl->worker, &QtHttpSseWorker::transportClosed, [this]() {
         if (m_impl->onClose) m_impl->onClose();
     });
-    QObject::connect(m_impl->worker, &QtHttpSseWorker::transportClosed, m_impl->thread, &QThread::quit);
-    QObject::connect(m_impl->thread, &QThread::finished, m_impl->worker, &QObject::deleteLater);
 
-    QObject::connect(m_impl->thread, &QThread::finished, [this]() {
-        if (m_impl->running) {
-            m_impl->running = false;
-            if (m_impl->thread) {
-                m_impl->thread->deleteLater();
-                m_impl->thread = nullptr;
-            }
-            m_impl->worker = nullptr;
-        }
-    });
-
-    m_impl->thread->start();
+    McpIoContext::shared()->post([w = m_impl->worker]() { w->startStream(); });
     m_impl->running = true;
     return true;
 }
@@ -78,13 +65,20 @@ void QtHttpSseTransport::close() {
         return;
     }
     m_impl->running = false;
-    
-    QMetaObject::invokeMethod(m_impl->worker, &QtHttpSseWorker::stopStream, Qt::BlockingQueuedConnection);
-    m_impl->thread->quit();
-    m_impl->thread->wait();
-    delete m_impl->thread;
-    m_impl->thread = nullptr;
-    m_impl->worker = nullptr;
+
+    if (m_impl->worker) {
+        auto* w = m_impl->worker;
+        m_impl->worker = nullptr;
+        // 同线程守卫：close 可能从 I/O 线程回调路径触发（如 session onClose），
+        // 此时 BlockingQueuedConnection 会与自身死锁，必须直接调用。
+        if (McpIoContext::shared()->isCurrentThread()) {
+            w->stopStream();
+            w->deleteLater();
+        } else {
+            QMetaObject::invokeMethod(w, &QtHttpSseWorker::stopStream, Qt::BlockingQueuedConnection);
+            w->deleteLater();
+        }
+    }
 }
 
 bool QtHttpSseTransport::send(const std::string& message) {
@@ -92,7 +86,7 @@ bool QtHttpSseTransport::send(const std::string& message) {
         return false;
     }
     bool accepted = false;
-    if (QThread::currentThread() == m_impl->thread) {
+    if (McpIoContext::shared()->isCurrentThread()) {
         accepted = m_impl->worker->postMessage(QString::fromStdString(message));
     } else {
         QMetaObject::invokeMethod(

@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include "mcp_core/McpClientSession.h"
+#include "mcp_core/McpStatelessSession.h"
 #include "mcp_core/McpOAuthClient.h"
 #include "mcp_core/IMcpTransport.h"
 #include "mcp_core/McpReconnectPolicy.h"
@@ -721,9 +722,9 @@ bool McpQtClient::runSyncWithTimeout(Initiator&& initiator, int timeoutMs) {
         ctx->loopPtr->quit();
     };
 
-    int64_t idBefore = m_session ? m_session->getLastRequestId() : 0;
-
-    initiator(safeQuit);
+    // initiator 返回本次发出的精确请求 id（0 = 未发出）。超时按 id 取消，
+    // 不再用 lastRequestId 推断（并发请求/重连回放场景下会取消错请求）。
+    int64_t requestId = initiator(safeQuit);
 
     if (timeoutMs > 0) {
         timer.start(timeoutMs);
@@ -732,11 +733,8 @@ bool McpQtClient::runSyncWithTimeout(Initiator&& initiator, int timeoutMs) {
     ctx->exited = true;
     ctx->loopPtr = nullptr;
     if (!ctx->completed) {
-        if (m_session) {
-            int64_t idAfter = m_session->getLastRequestId();
-            if (idAfter > idBefore) {
-                m_session->cancelRequest(idAfter);
-            }
+        if (m_session && requestId > 0) {
+            m_session->cancelRequest(requestId);
         }
     }
 
@@ -744,11 +742,19 @@ bool McpQtClient::runSyncWithTimeout(Initiator&& initiator, int timeoutMs) {
 }
 
 void McpQtClient::setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> t) {
-    m_session = std::make_shared<mcp::McpClientSession>(t);
+    // 终态架构 §3：stateless 模式使用 McpStatelessSession（演进核心），
+    // legacy 模式使用 McpClientSession（冻结）。
+    if (m_statelessMode) {
+        m_statelessSession = std::make_shared<mcp::McpStatelessSession>(t);
+        m_session = m_statelessSession;
+        m_statelessSession->setLogLevel(m_requestLogLevel.toStdString());
+    } else {
+        m_statelessSession.reset();
+        m_session = std::make_shared<mcp::McpClientSession>(t);
+    }
     m_session->init();
     m_session->setProtocolVersion(m_protocolVersion.toStdString());
     m_session->setStatelessMode(m_statelessMode);
-    m_session->setLogLevel(m_requestLogLevel.toStdString());
     
     nlohmann::json caps = m_clientCapabilities;
     if (caps.is_null() || caps.empty()) {
@@ -797,7 +803,7 @@ void McpQtClient::setupTransportCommon(std::shared_ptr<mcp::IMcpTransport> t) {
 
     // MCP 2026-07-28 MRTR: 将 session 层的 input_required 挂起桥接为 inputRequired 信号。
     // requestState 原样透传（客户端 MUST NOT 解析/修改），reply 时以 InputResponses 结构回填。
-    m_session->setMrtrHandler([this](const std::string& requestId,
+    if (m_statelessSession) m_statelessSession->setMrtrHandler([this](const std::string& requestId,
                                      const nlohmann::json& inputRequests,
                                      const nlohmann::json& requestParams,
                                      const std::string& requestState,
@@ -856,7 +862,7 @@ bool McpQtClient::doInitializeAndWait(const QString& name,const QString& ver,int
         // 做一次 server/discover 获取信息（客户端 OPTIONAL，失败不阻断），随后直接就绪。
         // 超时截断为 3s，避免无响应（如 OAuth 拒绝后）长时间阻塞同步连接路径。
         runSyncWithTimeout([this](auto quit) {
-            m_session->discoverServer([quit](const mcp::McpServerDiscovery&, const nlohmann::json&) {
+            return m_statelessSession->discoverServer([quit](const mcp::McpServerDiscovery&, const nlohmann::json&) {
                 quit();
             });
         }, std::min(to, 3000));
@@ -864,7 +870,7 @@ bool McpQtClient::doInitializeAndWait(const QString& name,const QString& ver,int
     }
     auto initOkPtr = std::make_shared<bool>(false);
     bool ok = runSyncWithTimeout([initOkPtr, name, ver, this](auto quit) {
-        m_session->initialize(name.toStdString(), ver.toStdString(), [initOkPtr, quit](bool success, const nlohmann::json&) {
+        return m_session->initialize(name.toStdString(), ver.toStdString(), [initOkPtr, quit](bool success, const nlohmann::json&) {
             *initOkPtr = success;
             quit();
         });
@@ -907,7 +913,8 @@ McpQtClient::DiscoverInfo McpQtClient::discoverServer(int to) {
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->discoverServer([result, quitHandle](const mcp::McpServerDiscovery& d, const nlohmann::json&) {
+        if (!m_statelessSession) { quit(); return int64_t(0); }
+        return m_statelessSession->discoverServer([result, quitHandle](const mcp::McpServerDiscovery& d, const nlohmann::json&) {
             *result = d;
             (*quitHandle)();
         });
@@ -920,7 +927,11 @@ void McpQtClient::discoverServerAsync(std::function<void(const DiscoverInfo&, co
         if (callback) QMetaObject::invokeMethod(this, [=]() { DiscoverInfo e; callback(e, QStringLiteral("No session")); }, Qt::QueuedConnection);
         return;
     }
-    m_session->discoverServer([this, callback](const mcp::McpServerDiscovery& d, const nlohmann::json& error) {
+    if (!m_statelessSession) {
+        if (callback) QMetaObject::invokeMethod(this, [=]() { DiscoverInfo e; callback(e, QStringLiteral("Stateless session not available")); }, Qt::QueuedConnection);
+        return;
+    }
+    m_statelessSession->discoverServer([this, callback](const mcp::McpServerDiscovery& d, const nlohmann::json& error) {
         if (!callback) return;
         QString err = error.empty() ? QString{} : QString::fromStdString(error.dump());
         callback(_convertDiscover(d), err);
@@ -946,7 +957,7 @@ std::vector<McpQtTool> McpQtClient::listTools(int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listTools("", [result, quitHandle](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const nlohmann::json& error) {
+        return m_session->listTools("", [result, quitHandle](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const nlohmann::json& error) {
             *result = tools;
             (*quitHandle)();
         });
@@ -963,7 +974,7 @@ std::vector<McpQtTool> McpQtClient::listTools(const QString& c,QString* n,int to
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listTools(c.toStdString(), [result, ns, quitHandle](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const nlohmann::json& error) {
+        return m_session->listTools(c.toStdString(), [result, ns, quitHandle](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const nlohmann::json& error) {
             *result = tools;
             *ns = nextCursor;
             (*quitHandle)();
@@ -985,7 +996,7 @@ std::vector<McpQtTool> McpQtClient::listTools(const QString& c, QString* n, McpC
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listToolsWithCache(c.toStdString(), [result, ns, coreHint, quitHandle](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
+        return m_session->listToolsWithCache(c.toStdString(), [result, ns, coreHint, quitHandle](const std::vector<mcp::McpTool>& tools, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
             *result = tools;
             *ns = nextCursor;
             *coreHint = h;
@@ -1159,7 +1170,7 @@ McpResult McpQtClient::callTool(const QString& nm,const QJsonObject& a,ProgressC
     auto quitHandle = std::make_shared<std::function<void()>>();
     bool ok = runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        callToolAsyncImpl(nm, a, this, [resultData, quitHandle](McpResult res) {
+        return callToolAsyncImpl(nm, a, this, [resultData, quitHandle](McpResult res) {
             *resultData = res;
             (*quitHandle)();
         }, onP, to);
@@ -1177,7 +1188,7 @@ void McpQtClient::callToolAsync(const QString& nm, const QJsonObject& a, std::fu
 void McpQtClient::callToolAsync(const QString& nm, const QJsonObject& a, QObject* ctx, std::function<void(McpResult)> cb, ProgressCallback onP) {
     callToolAsyncImpl(nm, a, ctx, std::move(cb), onP, 0);
 }
-void McpQtClient::callToolAsyncImpl(const QString& nm, const QJsonObject& a, QObject* ctx, std::function<void(McpResult)> cb, ProgressCallback onP, int pollTimeoutMs) {
+int64_t McpQtClient::callToolAsyncImpl(const QString& nm, const QJsonObject& a, QObject* ctx, std::function<void(McpResult)> cb, ProgressCallback onP, int pollTimeoutMs) {
     QString actualName = stripNamespace(nm);
     emit toolCalled(nm, a);
     QString errStr;
@@ -1191,7 +1202,7 @@ void McpQtClient::callToolAsyncImpl(const QString& nm, const QJsonObject& a, QOb
             }
         }
         else { cb(res); }
-        return;
+        return 0;
     }
     if(!m_session) {
         McpResult res{true, {}, QStringLiteral("No session"), {}};
@@ -1203,7 +1214,7 @@ void McpQtClient::callToolAsyncImpl(const QString& nm, const QJsonObject& a, QOb
             }
         }
         else { cb(res); }
-        return;
+        return 0;
     }
 
     auto internalOnP = [this, nm, onP](float p, float t, const QString& msg) {
@@ -1215,7 +1226,7 @@ void McpQtClient::callToolAsyncImpl(const QString& nm, const QJsonObject& a, QOb
         }
     };
 
-    sendRequest("tools/call", QJsonObject{{"name",nm},{"arguments",a}}, ctx, [this, nm, cb, ctx, pollTimeoutMs](const QJsonObject& r, const QJsonObject& e) {
+    return sendRequest("tools/call", QJsonObject{{"name",nm},{"arguments",a}}, ctx, [this, nm, cb, ctx, pollTimeoutMs](const QJsonObject& r, const QJsonObject& e) {
         // Tasks 扩展（SEP-2663）：服务器返回 CreateTaskResult（resultType: "task"）时
         // 透明轮询到终态，对外仍只暴露最终结果（保持 callTool 既有契约）。
         if (e.isEmpty() && r.value(QStringLiteral("resultType")).toString() == QStringLiteral("task")) {
@@ -1346,12 +1357,16 @@ void McpQtClient::registerMcpTaskCapabilities() {
     }
 }
 
-void McpQtClient::getTaskAsync(const QString& taskId, std::function<void(const McpQtTask& task, const QString& error)> callback) {
+int64_t McpQtClient::getTaskAsync(const QString& taskId, std::function<void(const McpQtTask& task, const QString& error)> callback) {
     if (!m_session) {
         callback(McpQtTask{}, QStringLiteral("No session"));
-        return;
+        return 0;
     }
-    m_session->getTask(taskId.toStdString(), [callback](const mcp::McpTask& task, const nlohmann::json& error) {
+    if (!m_statelessSession) {
+        callback(McpQtTask{}, QStringLiteral("Stateless session not available"));
+        return 0;
+    }
+    return m_statelessSession->getTask(taskId.toStdString(), [callback](const mcp::McpTask& task, const nlohmann::json& error) {
         if (!error.empty()) {
             callback(McpQtTask{}, QString::fromStdString(error.value("message", "tasks/get failed")));
             return;
@@ -1365,7 +1380,7 @@ McpQtTask McpQtClient::getTask(const QString& taskId, int timeoutMs) {
     auto quitHandle = std::make_shared<std::function<void()>>();
     bool ok = runSyncWithTimeout([&, quitHandle, result](const std::function<void()>& quit) {
         *quitHandle = quit;
-        getTaskAsync(taskId, [result, quitHandle](const McpQtTask& task, const QString&) {
+        return getTaskAsync(taskId, [result, quitHandle](const McpQtTask& task, const QString&) {
             *result = task;
             (*quitHandle)();
         });
@@ -1379,13 +1394,17 @@ McpQtTask McpQtClient::getTask(const QString& taskId, int timeoutMs) {
     return *result;
 }
 
-void McpQtClient::updateTaskAsync(const QString& taskId, const QJsonObject& inputResponses,
-                                  std::function<void(bool success, const QString& error)> callback) {
+int64_t McpQtClient::updateTaskAsync(const QString& taskId, const QJsonObject& inputResponses,
+                                     std::function<void(bool success, const QString& error)> callback) {
     if (!m_session) {
         callback(false, QStringLiteral("No session"));
-        return;
+        return 0;
     }
-    m_session->updateTask(taskId.toStdString(), _nl(inputResponses), [callback](bool success, const nlohmann::json& error) {
+    if (!m_statelessSession) {
+        callback(false, QStringLiteral("Stateless session not available"));
+        return 0;
+    }
+    return m_statelessSession->updateTask(taskId.toStdString(), _nl(inputResponses), [callback](bool success, const nlohmann::json& error) {
         if (success) {
             callback(true, QString());
         } else {
@@ -1399,7 +1418,7 @@ bool McpQtClient::updateTask(const QString& taskId, const QJsonObject& inputResp
     auto quitHandle = std::make_shared<std::function<void()>>();
     bool ok = runSyncWithTimeout([&, quitHandle, result](const std::function<void()>& quit) {
         *quitHandle = quit;
-        updateTaskAsync(taskId, inputResponses, [result, quitHandle](bool success, const QString&) {
+        return updateTaskAsync(taskId, inputResponses, [result, quitHandle](bool success, const QString&) {
             *result = success;
             (*quitHandle)();
         });
@@ -1407,12 +1426,16 @@ bool McpQtClient::updateTask(const QString& taskId, const QJsonObject& inputResp
     return ok && *result;
 }
 
-void McpQtClient::cancelTaskAsync(const QString& taskId, std::function<void(bool success, const QString& error)> callback) {
+int64_t McpQtClient::cancelTaskAsync(const QString& taskId, std::function<void(bool success, const QString& error)> callback) {
     if (!m_session) {
         callback(false, QStringLiteral("No session"));
-        return;
+        return 0;
     }
-    m_session->cancelTask(taskId.toStdString(), [callback](bool success, const nlohmann::json& error) {
+    if (!m_statelessSession) {
+        callback(false, QStringLiteral("Stateless session not available"));
+        return 0;
+    }
+    return m_statelessSession->cancelTask(taskId.toStdString(), [callback](bool success, const nlohmann::json& error) {
         if (success) {
             callback(true, QString());
         } else {
@@ -1426,7 +1449,7 @@ bool McpQtClient::cancelTask(const QString& taskId, int timeoutMs) {
     auto quitHandle = std::make_shared<std::function<void()>>();
     bool ok = runSyncWithTimeout([&, quitHandle, result](const std::function<void()>& quit) {
         *quitHandle = quit;
-        cancelTaskAsync(taskId, [result, quitHandle](bool success, const QString&) {
+        return cancelTaskAsync(taskId, [result, quitHandle](bool success, const QString&) {
             *result = success;
             (*quitHandle)();
         });
@@ -1835,7 +1858,7 @@ QJsonObject McpQtClient::listResources(const QString& c,QString* n,int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listResources(c.toStdString(), [resultData, ns, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const nlohmann::json& error) {
+        return m_session->listResources(c.toStdString(), [resultData, ns, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const nlohmann::json& error) {
             *resultData = result;
             *ns = nextCursor;
             (*quitHandle)();
@@ -1855,7 +1878,7 @@ QJsonObject McpQtClient::listResources(const QString& c, QString* n, McpCacheHin
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listResourcesWithCache(c.toStdString(), [resultData, ns, coreHint, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
+        return m_session->listResourcesWithCache(c.toStdString(), [resultData, ns, coreHint, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
             *resultData = result;
             *ns = nextCursor;
             *coreHint = h;
@@ -1905,7 +1928,7 @@ QJsonObject McpQtClient::readResource(const QString& u,int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->readResource(u.toStdString(), [resultData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
+        return m_session->readResource(u.toStdString(), [resultData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
             *resultData = result;
             (*quitHandle)();
         });
@@ -1935,7 +1958,7 @@ bool McpQtClient::subscribeResource(const QString& u,int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, ok, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->subscribeResource(u.toStdString(), [ok, quitHandle](bool success, const nlohmann::json& error) {
+        return m_session->subscribeResource(u.toStdString(), [ok, quitHandle](bool success, const nlohmann::json& error) {
             *ok = success;
             if (*quitHandle) (*quitHandle)();
         });
@@ -1968,7 +1991,7 @@ bool McpQtClient::unsubscribeResource(const QString& u,int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, ok, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->unsubscribeResource(u.toStdString(), [ok, quitHandle](bool success, const nlohmann::json& error) {
+        return m_session->unsubscribeResource(u.toStdString(), [ok, quitHandle](bool success, const nlohmann::json& error) {
             *ok = success;
             (*quitHandle)();
         });
@@ -1997,7 +2020,7 @@ int McpQtClient::subscribeResource(const QString& uri,
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, ok, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->subscribeResource(uri.toStdString(), [ok, quitHandle](bool success, const nlohmann::json& error) {
+        return m_session->subscribeResource(uri.toStdString(), [ok, quitHandle](bool success, const nlohmann::json& error) {
             *ok = success;
             (*quitHandle)();
         });
@@ -2033,7 +2056,7 @@ bool McpQtClient::unsubscribeResourceByToken(const QString& uri, int routerToken
         if(!m_session) return false;
         auto okPtr = std::make_shared<bool>(false);
         runSyncWithTimeout([okPtr, uri, this](auto quit) {
-            m_session->unsubscribeResource(uri.toStdString(), [okPtr, quit](bool success, const nlohmann::json&) {
+            return m_session->unsubscribeResource(uri.toStdString(), [okPtr, quit](bool success, const nlohmann::json&) {
                 *okPtr = success;
                 quit();
             });
@@ -2073,7 +2096,7 @@ std::vector<mcp::McpResourceTemplate> McpQtClient::listResourceTemplates(const Q
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listResourceTemplates(c.toStdString(), [resultData, ns, quitHandle](const std::vector<mcp::McpResourceTemplate>& templates, const std::string& nextCursor, const nlohmann::json& error) {
+        return m_session->listResourceTemplates(c.toStdString(), [resultData, ns, quitHandle](const std::vector<mcp::McpResourceTemplate>& templates, const std::string& nextCursor, const nlohmann::json& error) {
             *resultData = templates;
             *ns = nextCursor;
             (*quitHandle)();
@@ -2126,7 +2149,7 @@ QJsonObject McpQtClient::listPrompts(const QString& c,QString* n,int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listPrompts(c.toStdString(), [resultData, ns, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const nlohmann::json& error) {
+        return m_session->listPrompts(c.toStdString(), [resultData, ns, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const nlohmann::json& error) {
             *resultData = result;
             *ns = nextCursor;
             (*quitHandle)();
@@ -2146,7 +2169,7 @@ QJsonObject McpQtClient::listPrompts(const QString& c, QString* n, McpCacheHint*
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listPromptsWithCache(c.toStdString(), [resultData, ns, coreHint, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
+        return m_session->listPromptsWithCache(c.toStdString(), [resultData, ns, coreHint, quitHandle](const nlohmann::json& result, const std::string& nextCursor, const mcp::McpCacheHint& h, const nlohmann::json&) {
             *resultData = result;
             *ns = nextCursor;
             *coreHint = h;
@@ -2197,7 +2220,7 @@ QJsonObject McpQtClient::getPrompt(const QString& nm,const QJsonObject& a,int to
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->getPrompt(actualName.toStdString(), _nl(a), [resultData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
+        return m_session->getPrompt(actualName.toStdString(), _nl(a), [resultData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
             *resultData = result;
             (*quitHandle)();
         });
@@ -2232,7 +2255,7 @@ bool McpQtClient::ping(int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, ok, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->ping([ok, quitHandle](bool success, const nlohmann::json& error) {
+        return m_session->ping([ok, quitHandle](bool success, const nlohmann::json& error) {
             *ok = success;
             (*quitHandle)();
         });
@@ -2264,7 +2287,7 @@ QJsonObject McpQtClient::complete(const QJsonObject& rf,const QJsonObject& ag,in
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->complete(_nl(rf), _nl(ag), [resultData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
+        return m_session->complete(_nl(rf), _nl(ag), [resultData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
             *resultData = result;
             (*quitHandle)();
         });
@@ -2295,7 +2318,7 @@ bool McpQtClient::setLoggingLevel(const QString& lv,int to){
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->callTool("logging/setLevel", _nl(QJsonObject{{"level",lv}}), [errorData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
+        return m_session->callTool("logging/setLevel", _nl(QJsonObject{{"level",lv}}), [errorData, quitHandle](const nlohmann::json& result, const nlohmann::json& error) {
             *errorData = error;
             (*quitHandle)();
         });
@@ -2307,7 +2330,7 @@ bool McpQtClient::setLoggingLevel(const QString& lv,int to){
 void McpQtClient::setRequestLogLevel(const QString& level){
     m_requestLogLevel = level;
     if (m_session) {
-        m_session->setLogLevel(level.toStdString());
+        if (m_statelessSession) m_statelessSession->setLogLevel(level.toStdString());
     }
 }
 QString McpQtClient::requestLogLevel() const{
@@ -2446,7 +2469,11 @@ void McpQtClient::listenSubscriptionsAsync(const QJsonObject& filter, std::funct
         if (cb) QMetaObject::invokeMethod(this, [=]() { cb(false, "No session"); }, Qt::QueuedConnection);
         return;
     }
-    m_session->listenSubscriptions(_nl(filter), [this, cb](bool success, const std::string& error) {
+    if (!m_statelessSession) {
+        if (cb) QMetaObject::invokeMethod(this, [=]() { cb(false, QStringLiteral("Stateless session not available")); }, Qt::QueuedConnection);
+        return;
+    }
+    m_statelessSession->listenSubscriptions(_nl(filter), [this, cb](bool success, const std::string& error) {
         if (!cb) return;
         QString errStr = QString::fromStdString(error);
         QMetaObject::invokeMethod(this, [success, errStr, cb]() { cb(success, errStr); }, Qt::QueuedConnection);
@@ -2459,7 +2486,8 @@ bool McpQtClient::listenSubscriptions(const QJsonObject& filter, int timeoutMs) 
     auto quitHandle = std::make_shared<std::function<void()>>();
     runSyncWithTimeout([&, okPtr, quitHandle](const std::function<void()>& quit) {
         *quitHandle = quit;
-        m_session->listenSubscriptions(_nl(filter), [okPtr, quitHandle](bool success, const std::string&) {
+        if (!m_statelessSession) { quit(); return int64_t(0); }
+        return m_statelessSession->listenSubscriptions(_nl(filter), [okPtr, quitHandle](bool success, const std::string&) {
             *okPtr = success;
             (*quitHandle)();
         });
@@ -2468,7 +2496,7 @@ bool McpQtClient::listenSubscriptions(const QJsonObject& filter, int timeoutMs) 
 }
 
 void McpQtClient::cancelSubscription(int64_t requestId) {
-    if (m_session) m_session->cancelSubscription(requestId);
+    if (m_statelessSession) m_statelessSession->cancelSubscription(requestId);
 }
 
 // ========== 通知 ==========
@@ -2600,7 +2628,7 @@ void McpQtClient::close(int to){
         // GUI 线程禁止 runSyncWithTimeout：shutdown 若等不到响应会卡满 timeout（默认 5s）。
         if (!isMainGuiThread()) {
             runSyncWithTimeout([this](auto quit) {
-                m_session->shutdown([quit](bool) { quit(); });
+                return m_session->shutdown([quit](bool) { quit(); });
             }, to);
         }
         m_session->close();
@@ -3072,7 +3100,8 @@ void McpQtClient::connectToTransportAsync(std::shared_ptr<mcp::IMcpTransport> t,
 }
 
 void McpQtClient::doDiscoverAsync() {
-    m_session->discoverServer([this](const mcp::McpServerDiscovery& info, const nlohmann::json& error) {
+    if (!m_statelessSession) return;
+    m_statelessSession->discoverServer([this](const mcp::McpServerDiscovery& info, const nlohmann::json& error) {
         if (!error.empty() && !error.is_null()) {
             qWarning().noquote() << "[McpQtClient] server/discover failed (non-fatal):"
                                  << QString::fromStdString(error.dump());

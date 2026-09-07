@@ -12,6 +12,7 @@
 #include <QStackedWidget>
 #include <QMap>
 #include <QSet>
+#include <QNetworkAccessManager>
 #include <memory>
 #include "AgentSession.h"
 #include "AgentRegistry.h"

@@ -5,6 +5,7 @@
 #include "mcp_qt_client/McpPromptRouter.h"
 #include "mcp_qt_client/McpResourceRouter.h"
 #include "mcp_qt_client/McpDiagnosticReporter.h"
+#include "mcp_qt_client/McpConfigStore.h"
 #include <QObject>
 #include <QStringList>
 #include <QTimer>
@@ -14,6 +15,15 @@
 
 namespace mcp_qt {
 
+/**
+ * @brief 一站式 MCP 宿主（终态架构 §4：规范路径）。
+ *
+ * 规范路径：McpHost → McpServerManager → McpQtClient。新功能只加在这条路径上。
+ * McpHost 是薄 facade：配置持久化在 McpConfigStore，连接生命周期在
+ * McpServerManager，路由在三个 Router，诊断在 McpDiagnosticReporter。
+ * 需要细粒度控制时经 manager()/toolRouter() 等访问器下钻，但不要绕过
+ * McpHost 直接持有子组件状态。
+ */
 class McpHost : public QObject {
     Q_OBJECT
 public:
@@ -88,13 +98,6 @@ private:
     void finishStartup(bool success, const QString& summaryMsg);
     bool loadConfigs(const QList<McpServerConfig>& configs);
 
-    bool persistServerProperty(const QString& serverName, const QString& key, const QJsonValue& value);
-    bool persistServerObject(const QString& serverName, const QJsonObject& obj);
-    bool persistRemoveServer(const QString& serverName);
-    QJsonObject serializeServerConfig(const McpServerConfig& cfg) const;
-    // 读-改-写 mcpServers 配置：allowMissing 时文件缺失则从空对象开始；mutate 返回 false 不写回。
-    bool readWriteConfig(bool allowMissing, const std::function<bool(QJsonObject&)>& mutate);
-
     McpServerManager* m_manager;
     McpToolRouter* m_toolRouter;
     McpPromptRouter* m_promptRouter;
@@ -104,7 +107,8 @@ private:
     QTimer* m_watchdogTimer;
     bool m_isStarting{false};
     
-    QString m_lastConfigPath;
+    // 配置持久化（终态架构 §4：从 McpHost 抽出的 McpConfigStore）
+    McpConfigStore m_configStore;
     QMap<QString, bool> m_enabledServers;
     QList<McpServerConfig> m_loadedConfigs;
 };

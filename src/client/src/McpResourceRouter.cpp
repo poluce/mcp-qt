@@ -1,4 +1,5 @@
 #include "mcp_qt_client/McpResourceRouter.h"
+#include "mcp_qt_client/McpNamespace.h"
 #include "mcp_qt_client/McpServerManager.h"
 #include <QJsonArray>
 #include <QJsonObject>
@@ -60,13 +61,8 @@ void McpResourceRouter::fetchAllResourcesAsync(std::function<void(const QJsonArr
 
 QPair<QString, QString> McpResourceRouter::parseResourceUri(const QString& nameSpacedUri) const {
     if (!m_manager) return {};
-    for (const QString& serverName : m_manager->serverNames()) {
-        QString prefix = "mcp-" + serverName + "-";
-        if (nameSpacedUri.startsWith(prefix)) {
-            return {serverName, nameSpacedUri.mid(prefix.length())};
-        }
-    }
-    return {};
+    // 前缀解析收敛（终态架构 §4）：走 McpNamespace 单一实现
+    return McpNamespace::parseNamespacedUri(m_manager->serverNames(), nameSpacedUri);
 }
 
 QJsonObject McpResourceRouter::readResource(const QString& nameSpacedUri, int timeoutMs) {

@@ -2,16 +2,16 @@
 
 #include "mcp_core/IMcpTransport.h"
 #include <QObject>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
 #include <QUrl>
-#include <QPointer>
-#include <QTimer>
+#include <QMap>
+#include <QNetworkProxy>
 #include <memory>
 #include <functional>
 #include <map>
 
 namespace mcp_qt {
+
+class QtStatelessHttpWorker;
 
 // Token provider 回调
 using TokenProvider = std::function<std::string()>;
@@ -19,7 +19,10 @@ using TokenProvider = std::function<std::string()>;
 using AuthRetryHandler = std::function<bool(const std::string&)>;
 
 // Streamable HTTP Transport：POST 请求后根据 Content-Type 被动适配 JSON/SSE，
-// initialized 通知后启动 GET SSE 监听流，支持 401 OAuth 重试
+// initialized 通知后启动 GET SSE 监听流，支持 401 OAuth 重试。
+//
+// 终态架构 §2.1：网络 I/O 全部运行在 McpIoContext 共享 I/O 线程（内部 worker），
+// 回调经 queued 连接投递回本对象所在线程；本对象只是线程安全的配置/回调句柄。
 class QtStatelessHttpTransport : public QObject, public mcp::IMcpTransport {
     Q_OBJECT
 public:
@@ -39,34 +42,15 @@ public:
 
     // 扩展配置
     void setCustomHeaders(const QMap<QByteArray, QByteArray>& headers);
-    void setProxy(const class QNetworkProxy& proxy);
+    void setProxy(const QNetworkProxy& proxy);
     void setTokenProvider(TokenProvider provider);
     void setAuthRetryHandler(AuthRetryHandler handler);
 
-private slots:
-    void onReplyFinished(QNetworkReply* reply);
-
 private:
-    // 启动 GET SSE 监听流
-    void startSseListener();
-    void handleSseResponse(QNetworkReply* reply);
-    void processSseData(const QByteArray& data);
-
-    // 构建请求头
-    void applyCommonHeaders(QNetworkRequest& request, bool isGet = false);
-    QString currentBearerToken() const;
-
-    // 按 SEP-2243 对 MCP header 值做 Base64 sentinel 编码
-    QByteArray encodeMcpHeaderValue(const std::string& raw) const;
-
-    // 解析 SSE 响应
-    QByteArray m_sseBuffer;
-
     QUrl m_endpointUrl;
-    QPointer<QNetworkAccessManager> m_nam;
     QMap<QByteArray, QByteArray> m_headers;
+    QNetworkProxy m_proxy;
     bool m_isRunning{false};
-    bool m_sseListenerActive{false};
 
     std::string m_protocolVersion{"2026-07-28"};
 
@@ -80,18 +64,9 @@ private:
     // OAuth 支持
     TokenProvider m_tokenProvider;
     AuthRetryHandler m_authRetryHandler;
-    int m_authRetryCount{0};
-    static constexpr int kMaxAuthRetries = 3;
 
-    // 请求重试支持
-    QByteArray m_lastRequestData;
-    bool m_isRetrying{false};
-
-    // Session 支持
-    QString m_sessionId;
-
-    // SSE 监听
-    QNetworkReply* m_sseReply{nullptr};
+    // I/O 线程工作对象（start() 时创建并移入共享 I/O 线程）
+    QtStatelessHttpWorker* m_worker{nullptr};
 };
 
 } // namespace mcp_qt

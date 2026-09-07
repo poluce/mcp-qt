@@ -1,5 +1,6 @@
 #include "tests/common.h"
 #include "mcp_core/McpClientSession.h"
+#include "mcp_core/McpStatelessSession.h"
 #include "mcp_core/McpTask.h"
 #include "mcp_qt_client/McpQtClient.h"
 #include <nlohmann/json.hpp>
@@ -67,7 +68,7 @@ static bool waitForFlag(bool* flag, int timeoutMs = 3000) {
 // ============================================================================
 void test_qt_tasks_capability_declaration() {
     auto mock = std::make_shared<TasksMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mock);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mock);
     session->init();
     session->start();
     session->setStatelessMode(true);
@@ -93,7 +94,7 @@ void test_qt_tasks_capability_declaration() {
 // ============================================================================
 void test_qt_tasks_get_wire_and_parse() {
     auto mock = std::make_shared<TasksMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mock);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mock);
     session->init();
     session->start();
     session->setStatelessMode(true);
@@ -220,7 +221,7 @@ void test_qt_tasks_get_wire_and_parse() {
 // ============================================================================
 void test_qt_tasks_update_cancel_wire() {
     auto mock = std::make_shared<TasksMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mock);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mock);
     session->init();
     session->start();
     session->setStatelessMode(true);
@@ -278,7 +279,7 @@ void test_qt_tasks_update_cancel_wire() {
 // ============================================================================
 void test_qt_tasks_notifications() {
     auto mock = std::make_shared<TasksMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mock);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mock);
     session->init();
     session->start();
     session->setStatelessMode(true);

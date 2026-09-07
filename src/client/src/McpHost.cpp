@@ -67,7 +67,7 @@ McpHost::~McpHost() {
 bool McpHost::loadConfigFromFile(const QString& configFilePath) {
     try {
         auto loader = McpJsonConfigLoader::fromFile(configFilePath);
-        m_lastConfigPath = configFilePath; // 🌟 记录路径供热重载使用
+        m_configStore.setConfigPath(configFilePath); // 记录路径供热重载使用
         return loadConfigs(loader.load());
     } catch (const std::exception& e) {
         m_reporter->addError("Config", QString("Failed to load config file: %1").arg(e.what()));
@@ -153,13 +153,13 @@ void McpHost::restart(int timeoutMs) {
 }
 
 bool McpHost::reloadConfigAndRestart(int timeoutMs) {
-    if (m_lastConfigPath.isEmpty()) {
+    if (!m_configStore.hasConfigPath()) {
         m_reporter->addError("Restart", "No configuration file to reload.");
         return false;
     }
     stop();
     clearConfig();
-    bool ok = loadConfigFromFile(m_lastConfigPath);
+    bool ok = loadConfigFromFile(m_configStore.configPath());
     if (ok) {
         start(timeoutMs);
     }
@@ -208,7 +208,7 @@ void McpHost::setServerEnabled(const QString& serverName, bool enabled, bool per
         }
     }
     
-    if (persist) persistServerProperty(serverName, QStringLiteral("disabled"), !enabled);
+    if (persist) m_configStore.setServerProperty(serverName, QStringLiteral("disabled"), !enabled);
 }
 
 void McpHost::removeServerConfig(const QString& serverName, bool persist) {
@@ -220,7 +220,7 @@ void McpHost::removeServerConfig(const QString& serverName, bool persist) {
         }
     }
     m_manager->stopServer(serverName);
-    if (persist) persistRemoveServer(serverName);
+    if (persist) m_configStore.removeServer(serverName);
 }
 
 void McpHost::addOrUpdateServerConfig(const McpServerConfig& config, bool persist) {
@@ -243,94 +243,10 @@ void McpHost::addOrUpdateServerConfig(const McpServerConfig& config, bool persis
     }
     
     if (persist) {
-        persistServerObject(config.serverName, serializeServerConfig(config));
+        m_configStore.setServerObject(config.serverName, McpConfigStore::serializeServerConfig(config));
     }
 }
 
-bool McpHost::readWriteConfig(bool allowMissing, const std::function<bool(QJsonObject&)>& mutate) {
-    if (m_lastConfigPath.isEmpty()) return false;
-    QJsonObject root;
-    QFile file(m_lastConfigPath);
-    if (file.open(QIODevice::ReadOnly)) {
-        root = QJsonDocument::fromJson(file.readAll()).object();
-        file.close();
-    } else if (!allowMissing) {
-        return false;
-    }
-
-    if (!mutate(root)) return false;
-
-    QSaveFile saveFile(m_lastConfigPath);
-    if (saveFile.open(QIODevice::WriteOnly)) {
-        saveFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-        return saveFile.commit();
-    }
-    return false;
-}
-
-bool McpHost::persistServerProperty(const QString& serverName, const QString& key, const QJsonValue& value) {
-    return readWriteConfig(false, [&](QJsonObject& root) {
-        QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
-        if (!serversObj.contains(serverName)) return false;
-        QJsonObject srvObj = serversObj[serverName].toObject();
-        srvObj[key] = value;
-        serversObj[serverName] = srvObj;
-        if (root.contains(QStringLiteral("mcpServers"))) root[QStringLiteral("mcpServers")] = serversObj;
-        else root = serversObj;
-        return true;
-    });
-}
-
-bool McpHost::persistServerObject(const QString& serverName, const QJsonObject& obj) {
-    return readWriteConfig(true, [&](QJsonObject& root) {
-        QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
-        serversObj[serverName] = obj;
-        if (root.contains(QStringLiteral("mcpServers"))) root[QStringLiteral("mcpServers")] = serversObj;
-        else root = serversObj;
-        return true;
-    });
-}
-
-bool McpHost::persistRemoveServer(const QString& serverName) {
-    return readWriteConfig(false, [&](QJsonObject& root) {
-        QJsonObject serversObj = root.contains(QStringLiteral("mcpServers")) ? root[QStringLiteral("mcpServers")].toObject() : root;
-        serversObj.remove(serverName);
-        if (root.contains(QStringLiteral("mcpServers"))) root[QStringLiteral("mcpServers")] = serversObj;
-        else root = serversObj;
-        return true;
-    });
-}
-
-QJsonObject McpHost::serializeServerConfig(const McpServerConfig& cfg) const {
-    QJsonObject obj;
-    obj[QStringLiteral("disabled")] = cfg.disabled;
-    if (!cfg.command.isEmpty()) obj[QStringLiteral("command")] = cfg.command;
-    if (!cfg.args.isEmpty()) {
-        QJsonArray argsArr;
-        for (const auto& arg : cfg.args) argsArr.append(arg);
-        obj[QStringLiteral("args")] = argsArr;
-    }
-    if (!cfg.url.isEmpty()) obj[QStringLiteral("url")] = cfg.url;
-    if (!cfg.type.isEmpty()) obj[QStringLiteral("type")] = cfg.type;
-    if (!cfg.nameSpace.isEmpty()) obj[QStringLiteral("namespace")] = cfg.nameSpace;
-    
-    if (!cfg.env.isEmpty()) {
-        QJsonObject envs;
-        for (auto it = cfg.env.constBegin(); it != cfg.env.constEnd(); ++it) {
-            envs[it.key()] = it.value();
-        }
-        obj[QStringLiteral("env")] = envs;
-    }
-    
-    if (!cfg.headers.isEmpty()) {
-        QJsonObject hdrs;
-        for (auto it = cfg.headers.constBegin(); it != cfg.headers.constEnd(); ++it) {
-            hdrs[it.key()] = it.value();
-        }
-        obj[QStringLiteral("headers")] = hdrs;
-    }
-    return obj;
-}
 
 bool McpHost::isServerEnabled(const QString& serverName) const {
     return m_enabledServers.value(serverName, false);

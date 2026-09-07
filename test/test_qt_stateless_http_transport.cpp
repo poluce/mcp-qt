@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QTimer>
+#include <QThread>
 #include <functional>
 #include <memory>
 
@@ -152,4 +153,37 @@ void test_qt_stateless_http_transport_trace_headers() {
     TM_ASSERT_TRUE(server.lastRequestData.contains("Traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), "Should send traceparent header");
     TM_ASSERT_TRUE(server.lastRequestData.contains("Tracestate: congo=t61rcWkgMzE"), "Should send tracestate header");
     TM_ASSERT_TRUE(server.lastRequestData.contains("Baggage: userId=alice"), "Should send baggage header");
+}
+
+// 终态架构 §2.2 线程契约：transport 回调必须投递回 transport 所在线程（client 线程），
+// 网络 I/O 在共享 I/O 线程执行。
+void test_qt_stateless_transport_callback_thread_contract() {
+    MockStatelessServer server;
+    server.handler = [](const QByteArray&) {
+        return QByteArray("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    };
+
+    QString url = QString("http://127.0.0.1:%1/rpc").arg(server.port());
+    mcp_qt::QtStatelessHttpTransport transport(url);
+
+    QThread* expectedThread = QThread::currentThread();
+    bool callbackFired = false;
+    bool callbackOnRightThread = false;
+    transport.setOnMessage([&](const std::string&) {
+        callbackFired = true;
+        callbackOnRightThread = (QThread::currentThread() == expectedThread);
+    });
+
+    TM_ASSERT_TRUE(transport.start(), "transport should start");
+    TM_ASSERT_TRUE(transport.send("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}}"),
+                   "send should be accepted");
+
+    // 等待回调经 queued 连接投递回主线程
+    for (int i = 0; i < 50 && !callbackFired; ++i) {
+        waitEvents(20);
+    }
+    TM_ASSERT_TRUE(callbackFired, "callback should fire");
+    TM_ASSERT_TRUE(callbackOnRightThread, "callback must fire on the transport's thread");
+
+    transport.close();
 }

@@ -27,7 +27,11 @@ add_library(mcp_qt_client STATIC
     include/mcp_qt_client/McpHost.h
     src/McpHost.cpp
     include/mcp_qt_client/McpServerView.h
+    include/mcp_qt_client/McpNamespace.h
+    include/mcp_qt_client/McpConfigStore.h
     src/McpServerView.cpp
+    src/McpNamespace.cpp
+    src/McpConfigStore.cpp
     include/mcp_qt_client/McpLogger.h
     src/McpLogger.cpp
     include/mcp_qt_client/McpDiagnosticReporter.h

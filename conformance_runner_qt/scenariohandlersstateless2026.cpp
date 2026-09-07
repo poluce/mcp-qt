@@ -14,6 +14,7 @@
 
 #include "RunnerConfig.h"
 #include <mcp_core/McpClientSession.h>
+#include <mcp_core/McpStatelessSession.h>
 #include <mcp_qt_transport/QtStatelessHttpTransport.h>
 #include <nlohmann/json.hpp>
 #include <QEventLoop>
@@ -41,10 +42,10 @@ static bool runBlocking(const std::function<void(const std::function<void()>&)>&
 }
 
 // 通用 stateless HTTP 连接（2026-07-28 免握手）
-static std::shared_ptr<McpClientSession> connectStateless(const RunnerConfig& config, std::string* errOut = nullptr) {
+static std::shared_ptr<mcp::McpStatelessSession> connectStateless(const RunnerConfig& config, std::string* errOut = nullptr) {
     auto transport = std::make_shared<QtStatelessHttpTransport>(QString::fromStdString(config.serverUrl));
     transport->setProtocolVersion("2026-07-28");
-    auto session = std::make_shared<McpClientSession>(transport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(transport);
     session->init();
     if (!session->start()) {
         if (errOut) *errOut = "transport start failed";
@@ -56,7 +57,7 @@ static std::shared_ptr<McpClientSession> connectStateless(const RunnerConfig& co
 }
 
 // 安装自动 MRTR handler：对 elicitation/create 表单请求自动接受（布尔字段置 true，其余置字符串）
-static void installAutoMrtrHandler(std::shared_ptr<McpClientSession> session) {
+static void installAutoMrtrHandler(std::shared_ptr<mcp::McpStatelessSession> session) {
     session->setMrtrHandler([](const std::string&,
                                const json& inputRequests,
                                const json&,
@@ -281,7 +282,7 @@ int runHttpCustomHeaders(const RunnerConfig& c) {
     // 上下文提供精确调用参数（MCP_CONFORMANCE_CONTEXT.toolCalls）。
     // 注意：conformance 在 Windows shell:true 下传递含中文/换行的 context 环境变量可能丢失，
     // 因此当 context 为空时回退到与 conformance 场景一致的硬编码参数。
-    json toolCalls = c.context.value("toolCalls", json::array());
+    json toolCalls = c.context.is_object() ? c.context.value("toolCalls", json::array()) : json::array();
     if (toolCalls.empty()) {
         toolCalls = json::array();
         toolCalls.push_back({

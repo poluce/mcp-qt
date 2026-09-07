@@ -1,5 +1,6 @@
 #include "tests/common.h"
 #include "mcp_core/McpClientSession.h"
+#include "mcp_core/McpStatelessSession.h"
 #include "mcp_core/IMcpTransport.h"
 #include <nlohmann/json.hpp>
 #include <string>
@@ -26,15 +27,11 @@ public:
 
 void test_qt_stateless_session_meta_injection() {
     auto mockTransport = std::make_shared<StatelessMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mockTransport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mockTransport);
     session->init();
     session->start();
 
-    // 默认未初始化状态下，isReady 为 false
-    TM_ASSERT_TRUE(!session->isReady(), "default uninitialized session should not be ready");
-
-    // 启用 2026-07-28 无状态模式
-    session->setStatelessMode(true);
+    // McpStatelessSession 构造即无状态模式：免握手，isReady 恒为 true
     TM_ASSERT_TRUE(session->isStatelessMode(), "stateless mode should be enabled");
     TM_ASSERT_TRUE(session->isReady(), "stateless session should be ready without initialize handshake");
 
@@ -64,7 +61,7 @@ void test_qt_stateless_session_meta_injection() {
 
 void test_qt_stateless_session_mrtr_loop() {
     auto mockTransport = std::make_shared<StatelessMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mockTransport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mockTransport);
     session->init();
     session->start();
     session->setStatelessMode(true);
@@ -167,7 +164,7 @@ void test_qt_stateless_session_mrtr_loop() {
 void test_qt_stateless_session_multi_round_mrtr_loop() {
     // 边界测试 2：连续 3 轮交互，逐轮回显不同的 requestState
     auto mockTransport = std::make_shared<StatelessMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mockTransport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mockTransport);
     session->init();
     session->start();
     session->setStatelessMode(true);
@@ -262,7 +259,7 @@ void test_qt_stateless_session_multi_round_mrtr_loop() {
 // MCP 2026-07-28 per-request logLevel（SEP-2577）注入验证
 void test_qt_stateless_session_log_level() {
     auto mockTransport = std::make_shared<StatelessMockTransport>();
-    auto session = std::make_shared<mcp::McpClientSession>(mockTransport);
+    auto session = std::make_shared<mcp::McpStatelessSession>(mockTransport);
     session->init();
     session->start();
     session->setStatelessMode(true);

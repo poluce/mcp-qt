@@ -1,4 +1,5 @@
 #include "mcp_qt_client/McpPromptRouter.h"
+#include "mcp_qt_client/McpNamespace.h"
 #include "mcp_qt_client/McpServerManager.h"
 #include <QJsonArray>
 #include <QJsonObject>
@@ -36,13 +37,8 @@ QJsonArray McpPromptRouter::fetchAllPrompts(int timeoutMs) const {
 
 QPair<QString, QString> McpPromptRouter::parsePromptName(const QString& nameSpacedPromptName) const {
     if (!m_manager) return {};
-    for (const QString& serverName : m_manager->serverNames()) {
-        QString prefix = serverName + "_";
-        if (nameSpacedPromptName.startsWith(prefix)) {
-            return {serverName, nameSpacedPromptName.mid(prefix.length())};
-        }
-    }
-    return {};
+    // 前缀解析收敛（终态架构 §4）：走 McpNamespace 单一实现
+    return McpNamespace::parseNamespacedName(m_manager->serverNames(), nameSpacedPromptName);
 }
 
 QJsonObject McpPromptRouter::getPrompt(const QString& nameSpacedPromptName, const QJsonObject& arguments, int timeoutMs) {

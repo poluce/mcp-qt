@@ -2,6 +2,7 @@
 
 // mcp_core — MCP C++ SDK 一站式头文件
 #include "McpClientSession.h"
+#include "McpStatelessSession.h"
 #include "McpTool.h"
 #include "McpResource.h"
 #include "McpPrompt.h"
