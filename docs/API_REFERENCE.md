@@ -6,6 +6,9 @@
 - [McpQtClient —— 主客户端](#mcpqtclient--主客户端)
 - [McpQtClientBuilder —— 构造器](#mcpqtclientbuilder--构造器)
 - [MCP 2026-07-28 API](#mcp-2026-07-28-api)
+- [核心会话与传输基础设施](#核心会话与传输基础设施)
+  - [McpStatelessSession](#mcpstatelesssession--2026-07-28-无状态会话core-层)
+  - [McpIoContext](#mcpiocontext--共享-io-线程transport-层)
 - [同步 API](#同步-api)
 - [异步 API](#异步-api)
 - [类型化结果](#类型化结果)
@@ -19,6 +22,8 @@
   - [McpPromptRouter](#mcppromptrouter)
   - [McpResourceRouter](#mcpresourcerouter)
   - [McpServerConfig](#mcpserverconfig)
+  - [McpConfigStore](#mcpconfigstore--配置持久化)
+  - [McpNamespace](#mcpnamespace--命名空间前缀解析)
   - [IMcpConfigLoader / McpJsonConfigLoader](#imcpconfigloader--mcpjsonconfigloader)
   - [McpResourceSubscriptionRouter](#mcpresourcesubscriptionrouter)
   - [McpDiagnosticReporter](#mcpdiagnosticreporter)
@@ -257,6 +262,94 @@ client->setTraceContext(trace);
 ```
 
 `setLoggingLevel("debug")` 在 2026-07-28 下会改走 per-request logLevel；新代码请直接用 `setRequestLogLevel`。
+
+---
+
+## 核心会话与传输基础设施
+
+### McpStatelessSession —— 2026-07-28 无状态会话（core 层）
+
+stateless 协议族的演进核心（终态架构 §3）：承载 server/discover、MRTR、Tasks、subscriptions/listen、每请求 logLevel、self-contained `_meta` 注入。基类 `McpClientSession` 保留 legacy 握手与共享机制，冻结不再扩展。`McpQtClient` 在 stateless 模式下自动创建并使用它，一般无需直接接触；直接使用 core 层时按需创建。
+
+**头文件**：`#include <mcp_core/McpStatelessSession.h>`
+
+```cpp
+auto session = std::make_shared<mcp::McpStatelessSession>(transport);
+session->init();
+session->start();  // 免 initialize 握手，isReady() 恒为 true
+
+// server/discover（bootstrap RPC）
+session->discoverServer([](const mcp::McpServerDiscovery& info, const nlohmann::json& error) {
+    // info.supportedVersions / capabilities / serverInfo / ttlMs / cacheScope
+});
+
+// MRTR：注册 input_required 处理器
+session->setMrtrHandler([](const std::string& requestId,
+                           const nlohmann::json& inputRequests,
+                           const nlohmann::json& requestParams,
+                           const std::string& requestState,
+                           std::function<void(const nlohmann::json&)> replyCb) {
+    // 收集用户输入后 replyCb(inputResponses)
+});
+
+// Tasks 扩展
+session->getTask(taskId, [](const mcp::McpTask& task, const nlohmann::json& error) {});
+session->updateTask(taskId, inputResponses, [](bool success, const nlohmann::json& error) {});
+session->cancelTask(taskId, [](bool success, const nlohmann::json& error) {});
+
+// subscriptions/listen
+session->listenSubscriptions(filter, [](bool success, const std::string& error) {});
+session->setSubscriptionListener([](int64_t subscriptionId, const std::string& method,
+                                    const nlohmann::json& params) {});
+
+// 每请求日志级别（SEP-2577）
+session->setLogLevel("debug");
+```
+
+| 方法 | 说明 |
+|------|------|
+| `discoverServer(callback)` | server/discover，返回请求 id |
+| `setMrtrHandler(handler)` | 注册 MRTR input_required 处理器 |
+| `getTask/updateTask/cancelTask(taskId, ..., callback)` | Tasks 扩展（SEP-2663），返回请求 id |
+| `getTaskSync/updateTaskSync/cancelTaskSync(...)` | 同步变体（仅限非 GUI 线程） |
+| `listenSubscriptions(filter, callback)` | subscriptions/listen（SEP-2330） |
+| `cancelSubscription(requestId)` | 取消订阅 |
+| `setSubscriptionListener(listener)` | 订阅通知派发监听器 |
+| `setLogLevel/getLogLevel` | 每请求日志级别（SEP-2577） |
+
+**线程契约**：与基类一致——无锁单线程状态机，所有调用与回调发生在 client 所在线程。
+
+---
+
+### McpIoContext —— 共享 I/O 线程（transport 层）
+
+所有 transport 的网络 I/O（QNAM 请求、SSE 流、QProcess 子进程）都运行在这条共享线程上；回调经 queued 连接投递回 client 线程。默认进程级共享实例，`McpQtClientBuilder` 可注入自定义实例（如测试隔离）。
+
+**头文件**：`#include <mcp_qt_transport/McpIoContext.h>`
+
+```cpp
+// 默认共享实例（懒启动，进程级，故意泄漏）
+mcp_qt::McpIoContext* io = mcp_qt::McpIoContext::shared();
+
+// 投递任务到 I/O 线程（已在 I/O 线程则直接执行）
+io->post([]() { /* 网络相关操作 */ });
+
+// 自定义实例（测试隔离用）
+auto custom = std::make_unique<mcp_qt::McpIoContext>();
+custom->start();
+custom->post([]() {});
+custom->stop();
+```
+
+| 方法 | 说明 |
+|------|------|
+| `static shared()` | 进程级共享实例（懒启动） |
+| `thread()` | 底层 QThread |
+| `isCurrentThread()` | 当前是否在 I/O 线程 |
+| `post(fn)` | 投递任务到 I/O 线程；已在 I/O 线程则直接执行 |
+| `start()/stop()` | 启动/停止线程（shared 实例不调用 stop） |
+
+**注意**：`post()` 要求线程已 `start()`，否则投递永不执行；不要在 I/O 线程回调里做耗时操作。
 
 ---
 
@@ -1064,6 +1157,66 @@ router.callToolAsync("github_search_code", {{"q", "test"}},
 | `nameSpace` | `QString` | 自定义命名空间前缀（覆盖默认的 serverName） |
 | `env` | `QMap<QString,QString>` | 环境变量（支持 `$VAR` 引用） |
 | `headers` | `QMap<QString,QString>` | 自定义 HTTP 请求头 |
+
+---
+
+### McpConfigStore —— 配置持久化
+
+从 McpHost 抽出的配置文件读写职责（终态架构 §4）：配置文件路径、读-改-写（QSaveFile 原子写）、服务器条目增删改。McpHost 只做编排，不再直接碰文件。
+
+**头文件**：`#include <mcp_qt_client/McpConfigStore.h>`
+
+```cpp
+mcp_qt::McpConfigStore store;
+store.setConfigPath("mcp_config.json");
+
+// 修改某服务器条目的单个属性（服务器不存在返回 false）
+store.setServerProperty("github", "disabled", true);
+
+// 覆盖某服务器条目（不存在则新增）
+store.setServerObject("github", mcp_qt::McpConfigStore::serializeServerConfig(cfg));
+
+// 删除某服务器条目
+store.removeServer("github");
+
+// 通用读-改-写
+store.readWrite(false, [](QJsonObject& root) {
+    root["custom"] = "value";
+    return true;  // 返回 false 不写回
+});
+```
+
+| 方法 | 说明 |
+|------|------|
+| `setConfigPath(path) / configPath() / hasConfigPath()` | 配置文件路径管理 |
+| `readWrite(allowMissing, mutate)` | 读-改-写；allowMissing 时文件缺失从空对象开始；mutate 返回 false 不写回 |
+| `setServerProperty(name, key, value)` | 修改服务器条目单属性 |
+| `setServerObject(name, obj)` | 覆盖服务器条目 |
+| `removeServer(name)` | 删除服务器条目 |
+| `static serializeServerConfig(cfg)` | McpServerConfig → 配置文件 JSON 对象 |
+
+---
+
+### McpNamespace —— 命名空间前缀解析
+
+`serverName_` / `mcp-{serverName}-` 前缀格式的唯一实现（终态架构 §4）。view 与三个 router 共用，禁止各自实现，避免格式漂移。
+
+**头文件**：`#include <mcp_qt_client/McpNamespace.h>`
+
+```cpp
+// 解析 serverName_ 前缀（工具/提示词）
+auto [server, tool] = mcp_qt::McpNamespace::parseNamespacedName(
+    serverNames, "github_search");  // → {"github", "search"}
+
+// 解析 mcp-{serverName}- 前缀（资源 URI）
+auto [server2, uri] = mcp_qt::McpNamespace::parseNamespacedUri(
+    serverNames, "mcp-github-file:///a.txt");  // → {"github", "file:///a.txt"}
+```
+
+| 函数 | 说明 |
+|------|------|
+| `parseNamespacedName(serverNames, namespaced)` | 解析 `serverName_` 前缀 → `{serverName, 原名}`；未匹配返回空 QPair。遍历全部服务器名做前缀匹配，兼容 serverName 含 `_` 的情况 |
+| `parseNamespacedUri(serverNames, namespacedUri)` | 解析 `mcp-{serverName}-` 前缀 → `{serverName, 原 URI}`；未匹配返回空 QPair |
 
 ---
 
