@@ -1,5 +1,7 @@
 # mcp-qt
 
+[![CI](https://github.com/poluce/mcp-qt/actions/workflows/ci.yml/badge.svg)](https://github.com/poluce/mcp-qt/actions/workflows/ci.yml)
+
 基于 Qt6 纯净实现的 **Model Context Protocol (MCP) 客户端 SDK**。
 
 整个 SDK 基于 **Qt6 (Core/Network/Widgets)** 原生架构进行响应式设计，零外部第三方网络库（如 libcurl、httplib 等）物理依赖，完整支持 **MCP 2026-07-28** 无状态协议核心并通过官方 conformance 验证。

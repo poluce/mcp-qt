@@ -31,8 +31,18 @@ WSL 侧只做源码编辑/查看/git 操作。
 - 探测是异步的——依赖探测结果的测试要轮询等待（如 `test_qt_server_manager_router` 的 clientB）；
 - 显式指定 `protocolVersion` 跳过探测；`type` 与 `protocolVersion` 矛盾时启动警告。
 
-## 4. 其他
+## 4. nlohmann::json 花括号初始化陷阱
 
-- 单元测试通过数：`tests_qt` 当前 69/69（2026-09-04 快照），更新前必须实际跑通；
+**教训**：`nlohmann::json x{nlohmann::json::object()};` 走的是 initializer_list 构造路径，实际得到 `[{}]` 数组而不是空对象（json 可迭代，花括号初始化把它当容器）。后果：`x.is_null()` 恒为 false，依赖 null 判断的代码（如 conformance runner 的 context 环境变量解析）永远不执行。这是 nlohmann 已知问题（issue #1594）。
+
+**约定**：json 成员默认值用 `nlohmann::json x;`（null）或 `= nlohmann::json::object()`（赋值而非花括号）。验证方法：`x.type_name()` 应为 "object" 而不是 "array"。
+
+## 5. CI 踩坑经验
+
+Qt/MinGW Windows CI 的七个环境差异（Qt 版本选择、工具链 ABI、header 大小写等）已沉淀为 skill：`.agents/skills/qt-ci-troubleshooting/SKILL.md`。CI 失败或本地/CI 行为不一致时先加载该 skill 对照排查。
+
+## 6. 其他
+
+- 单元测试通过数：`tests_qt` 当前 72/72（2026-09-08 快照），更新前必须实际跑通；
 - 中文注释用 UTF-8 直接写汉字，不用 `\uXXXX` 转义；
 - 不擅自 `git add`/`git reset`/`git rm --cached`，除非用户明确要求。
