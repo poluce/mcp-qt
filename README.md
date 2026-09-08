@@ -8,6 +8,8 @@
 
 📖 **使用手册请查阅 [API 参考手册 (docs/API_REFERENCE.md)](docs/API_REFERENCE.md)**
 
+⬆️ **从 v0.1.x 升级请先读 [升级指南 (docs/UPGRADING.md)](docs/UPGRADING.md)**
+
 ---
 
 ## 官方合规与最新规范支持
