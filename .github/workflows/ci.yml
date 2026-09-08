@@ -17,6 +17,9 @@ jobs:
           # 官方在线仓库最新稳定版（本地开发机 6.11.0 不在官方渠道，CI 用 6.9.3）
           version: '6.9.3'
           arch: 'win64_mingw'
+          # 显式安装配套 MinGW 工具链：否则 cmake 会捡 runner 预装的 C:\mingw64，
+          # 编译产物与 Qt DLL ABI 不匹配，运行时报 0xC0000139
+          tools: 'tools_mingw1310'
           cache: true
 
       - name: Setup Node
@@ -25,7 +28,7 @@ jobs:
           node-version: '22'
 
       - name: Configure
-        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\g++.exe" -DCMAKE_C_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\gcc.exe"
 
       - name: Build tests_qt
         run: cmake --build build --target tests_qt -j 8
@@ -60,6 +63,9 @@ jobs:
           # 官方在线仓库最新稳定版（本地开发机 6.11.0 不在官方渠道，CI 用 6.9.3）
           version: '6.9.3'
           arch: 'win64_mingw'
+          # 显式安装配套 MinGW 工具链：否则 cmake 会捡 runner 预装的 C:\mingw64，
+          # 编译产物与 Qt DLL ABI 不匹配，运行时报 0xC0000139
+          tools: 'tools_mingw1310'
           cache: true
 
       - name: Setup Node
@@ -68,7 +74,7 @@ jobs:
           node-version: '22'
 
       - name: Configure
-        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\g++.exe" -DCMAKE_C_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\gcc.exe"
 
       - name: Build conformance runner
         run: cmake --build build --target mcp_client_conformance_qt -j 8
