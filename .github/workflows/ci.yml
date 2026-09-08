@@ -14,8 +14,9 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          # 官方在线仓库最新稳定版（本地开发机 6.11.0 不在官方渠道，CI 用 6.9.3）
-          version: '6.9.3'
+          # 6.10.3：6.9.x 的 setRawHeader 会把 header 名小写化（QTBUG-131474），
+          # 测试断言大小写敏感；6.11.0 官方仓库缺 Updates.xml 索引装不了
+          version: '6.10.3'
           arch: 'win64_mingw'
           # 显式安装配套 MinGW 工具链：否则 cmake 会捡 runner 预装的 C:\mingw64，
           # 编译产物与 Qt DLL ABI 不匹配，运行时报 0xC0000139
@@ -60,8 +61,9 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          # 官方在线仓库最新稳定版（本地开发机 6.11.0 不在官方渠道，CI 用 6.9.3）
-          version: '6.9.3'
+          # 6.10.3：6.9.x 的 setRawHeader 会把 header 名小写化（QTBUG-131474），
+          # 测试断言大小写敏感；6.11.0 官方仓库缺 Updates.xml 索引装不了
+          version: '6.10.3'
           arch: 'win64_mingw'
           # 显式安装配套 MinGW 工具链：否则 cmake 会捡 runner 预装的 C:\mingw64，
           # 编译产物与 Qt DLL ABI 不匹配，运行时报 0xC0000139
