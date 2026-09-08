@@ -28,7 +28,7 @@ jobs:
           node-version: '22'
 
       - name: Configure
-        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\g++.exe" -DCMAKE_C_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\gcc.exe"
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$env:IQTA_TOOLS\mingw1310_64\bin\g++.exe" -DCMAKE_C_COMPILER="$env:IQTA_TOOLS\mingw1310_64\bin\gcc.exe"
 
       - name: Build tests_qt
         run: cmake --build build --target tests_qt -j 8
@@ -74,7 +74,7 @@ jobs:
           node-version: '22'
 
       - name: Configure
-        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\g++.exe" -DCMAKE_C_COMPILER="$env:QT_ROOT_DIR\..\Tools\mingw1310_64\bin\gcc.exe"
+        run: cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$env:IQTA_TOOLS\mingw1310_64\bin\g++.exe" -DCMAKE_C_COMPILER="$env:IQTA_TOOLS\mingw1310_64\bin\gcc.exe"
 
       - name: Build conformance runner
         run: cmake --build build --target mcp_client_conformance_qt -j 8
